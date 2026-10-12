@@ -88,6 +88,70 @@ impl Default for EvalParams {
     }
 }
 
+impl EvalParams {
+    /// Names of the tunable weights, in `to_vec` order.
+    pub const TUNABLE: [&'static str; 19] = [
+        "ring1",
+        "ring2",
+        "ring3",
+        "ring4",
+        "ring5",
+        "freeS",
+        "freeB",
+        "freeG",
+        "freeA",
+        "perDest",
+        "queenFree",
+        "beetleOnQueen",
+        "attacker",
+        "handS",
+        "handB",
+        "handG",
+        "handA",
+        "ringDiscount",
+        "reach",
+    ];
+
+    /// Tunable weights as a flat vector (see `TUNABLE`).
+    pub fn to_vec(&self) -> Vec<i32> {
+        let mut v = Vec::with_capacity(Self::TUNABLE.len());
+        v.extend_from_slice(&self.queen_ring[1..=5]);
+        v.extend_from_slice(&self.free_piece[1..=4]);
+        v.extend([
+            self.per_dest,
+            self.queen_free,
+            self.beetle_on_queen,
+            self.attacker,
+        ]);
+        v.extend_from_slice(&self.in_hand[1..=4]);
+        v.extend([self.own_free_ring_discount, self.reach]);
+        v
+    }
+
+    /// Inverse of `to_vec`; values are clamped to their valid ranges.
+    pub fn from_vec(v: &[i32]) -> EvalParams {
+        assert_eq!(v.len(), Self::TUNABLE.len());
+        let mut p = EvalParams::default();
+        let nn = |x: i32| x.max(0);
+        for (dst, &x) in p.queen_ring[1..=5].iter_mut().zip(&v[0..5]) {
+            *dst = nn(x);
+        }
+        for (dst, &x) in p.free_piece[1..=4].iter_mut().zip(&v[5..9]) {
+            *dst = nn(x);
+        }
+        for (dst, &x) in p.in_hand[1..=4].iter_mut().zip(&v[13..17]) {
+            *dst = nn(x);
+        }
+        p.per_dest = nn(v[9]);
+        p.queen_free = nn(v[10]);
+        p.beetle_on_queen = nn(v[11]);
+        p.attacker = nn(v[12]);
+        p.own_free_ring_discount = v[17].clamp(0, 100);
+        p.reach = v[18].max(1); // 0 would switch the feature off
+        p
+    }
+}
+
 fn bug_index(b: Bug) -> usize {
     match b {
         Bug::Queen => 0,

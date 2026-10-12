@@ -167,3 +167,12 @@ fn shallow_search_beats_random_player() {
     }
     assert!(wins >= 5, "only {wins}/{games} wins against random");
 }
+
+#[test]
+fn eval_params_vector_round_trip() {
+    use hive_engine::ai::EvalParams;
+    let p = EvalParams::default();
+    let v = p.to_vec();
+    assert_eq!(v.len(), EvalParams::TUNABLE.len());
+    assert_eq!(EvalParams::from_vec(&v).to_vec(), v);
+}

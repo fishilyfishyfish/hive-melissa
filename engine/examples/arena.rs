@@ -22,7 +22,7 @@ enum Kind {
 }
 
 /// `kind[:flag,flag...]`, flags: `nolmr`, `norep`, `nott`, `fullmob`, `ring<pct>`, `pd<n>`,
-/// `qr<pct>` (scale queen ring), `at<n>`, `bq<n>`, `qf<n>`, `nohand`, `reach<n>`, `lmrs<n>`.
+/// `qr<pct>` (scale queen ring), `at<n>`, `bq<n>`, `qf<n>`, `nohand`, `reach<n>`, `lmrs<n>`, `pfile<path>` (weights from tune).
 #[derive(Clone, Debug)]
 struct Spec {
     kind: Kind,
@@ -58,6 +58,15 @@ fn searcher(spec: &Spec) -> Searcher {
             f if f.starts_with("bq") => s.params.beetle_on_queen = f[2..].parse().unwrap(),
             f if f.starts_with("qf") => s.params.queen_free = f[2..].parse().unwrap(),
             f if f.starts_with("nohand") => s.params.in_hand = [0; 5],
+            f if f.starts_with("pfile") => {
+                let text = std::fs::read_to_string(&f[5..]).expect("params file");
+                let v: Vec<i32> = text
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .filter(|x| !x.is_empty())
+                    .map(|x| x.parse::<f64>().expect("number").round() as i32)
+                    .collect();
+                s.params = hive_engine::ai::EvalParams::from_vec(&v);
+            }
             f if f.starts_with("lmrs") => s.lmr_start = f[4..].parse().unwrap(),
             f if f.starts_with("reach") => s.params.reach = f[5..].parse().unwrap(),
             f if f.starts_with("pd") => s.params.per_dest = f[2..].parse().unwrap(),
