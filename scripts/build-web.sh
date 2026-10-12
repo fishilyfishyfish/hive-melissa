@@ -5,7 +5,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root/engine"
-cargo build --release --target wasm32-unknown-unknown
+cargo build --release --lib --target wasm32-unknown-unknown
 wasm-bindgen --target web --no-typescript --out-dir "$root/web/pkg" \
   target/wasm32-unknown-unknown/release/hive_engine.wasm
 ls -l "$root/web/pkg"

@@ -34,11 +34,15 @@ engine/            Rust 엔진 (crate: hive-engine)
   src/game.rs      합법수 생성, 적용/되돌리기, 종국 판정, 단절점(Tarjan)
   src/ai.rs        평가함수 + 알파베타 탐색 (반복 심화, PVS, LMR, 조브리스트 치환표, 킬러/히스토리)
   src/uhp.rs       UHP 수 문자열/게임 문자열 파싱·출력
+  src/uhp_engine.rs          UHP 엔진 명령 처리 (info/newgame/play/pass/validmoves/bestmove/undo/options)
+  src/bin/hive-uhp.rs        UHP 엔진 실행 파일 (stdin/stdout). MzingaViewer 등에 붙일 수 있음
+  src/bin/uhp-match.rs       UHP 엔진 두 개를 프로세스로 띄워 대국 (버전 비교, 타 엔진 비교)
   src/json.rs      웹 UI용 JSON (serde 없이 직접 작성)
   src/wasm.rs      wasm-bindgen 바인딩 (wasm32 타깃에서만 컴파일)
   tests/rules.rs   규칙별 단위 테스트 (상황을 직접 구성)
   tests/crosscheck.rs        무작위 대국 교차검증
   tests/common/reference.rs  교차검증용 단순 별도 구현
+  tests/uhp_engine.rs        UHP 명령 처리 테스트
   tests/search.rs  탐색 테스트 (1수 승리, 1수 패배 방어, 알파베타 == 미니맥스, 시간 제한, 랜덤 상대 승리)
   examples/perft.rs          수 생성 성능 측정
   examples/arena.rs          엔진 대 엔진 자동 대국 (강도 측정, 설정 비교)
@@ -46,6 +50,8 @@ engine/            Rust 엔진 (crate: hive-engine)
 web/               바닐라 HTML/CSS/JS. 엔진은 Web Worker(worker.js)에서 호출
   pkg/             wasm-bindgen 출력 (빌드 산출물, 커밋 안 함)
 scripts/build-web.sh         WASM 빌드 → web/pkg
+scripts/build-version.sh     git 리비전의 hive-uhp 빌드 → .versions/<sha>/hive-uhp (캐시, 커밋 안 함)
+scripts/version-match.sh     두 리비전 대국 (예: worktree vs v0.4.0)
 .github/workflows/pages.yml  테스트 → WASM 빌드 → GitHub Pages 배포
 ```
 
@@ -54,7 +60,7 @@ scripts/build-web.sh         WASM 빌드 → web/pkg
 2. 웹 UI(사람 vs 랜덤 AI), Pages 배포 — **완료**
 3. 평가함수(여왕벌 주변 빈칸, 기동성, 묶인 말) + 알파베타(반복 심화, 조브리스트 치환표) — **완료**
    (웹 AI 난이도: 랜덤 / 쉬움 1수 / 보통 0.3초 / 어려움 1.5초 / 최강 5초, 힌트 버튼)
-4. 버전 간 자동 대국으로 강도 측정 — 도구(`examples/arena.rs`)는 있음. 버전 고정·기록 체계는 아직
+4. 버전 간 자동 대국으로 강도 측정 — **완료** (UHP 엔진 + `uhp-match` + 리비전 빌드 스크립트, 아래 "버전 기록")
 5. 확장 말: 모기, 무당벌레, 쥐며느리
 6. 분석 기능: 평가 그래프, 수순 탐색, 기보 입출력
 
@@ -70,6 +76,11 @@ HIVE_CROSSCHECK_GAMES=100 cargo test             # 교차검증 판 수 줄이�
 cargo run --release --example perft -- 6 300     # perft + 무작위 대국 측정
 cargo run --release --example arena -- t100 t100:ring0 100 4   # A 대 B, 100판, 무작위 시작 4수
 # 선수 지정: random | d<깊이> | t<ms>, 뒤에 :플래그 (nolmr, nott, fullmob, ring<%>, qr<%>, at<n>, bq<n>, qf<n>, pd<n>, nohand)
+
+# UHP / 버전 비교
+cargo build --release --bins                     # target/release/hive-uhp, uhp-match
+scripts/version-match.sh worktree v0.4.0 --games 200 --time-ms 100   # 지금 트리 vs 태그
+target/release/uhp-match --a "<엔진 명령>" --b "<엔진 명령>" --games 100 --time-ms-a 200 --time-ms-b 100
 
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.129 --locked   # Cargo.toml의 wasm-bindgen 버전과 반드시 일치
@@ -134,6 +145,27 @@ cd web && python3 -m http.server 8000           # http://localhost:8000
   - 내 여왕벌이 움직일 수 있음 +25, 상대 여왕벌 위에 내 딱정벌레 +60, 상대 여왕벌에 닿은 내 말 1개당 +8,
     손패 말 Q0/S4/B8/G6/A12.
   - 가중치 변형(여왕벌 벌점 ×0.7/×1.5, 공격 0/20, 손패 0, 여왕 기동 60)은 100판에서 모두 오차 범위(±5%) 안 → 현재 값 유지.
+
+### UHP / 버전 비교 (4단계)
+- **UHP 엔진**: `info`는 `id HiveMelissa v<버전>`(확장 말 없음이라 capabilities 줄 생략). `newgame`은 `Base`와
+  `Base;...` GameString만 받는다. 토너먼트 규칙은 항상 켬(UHP 엔진 관례). `bestmove`는 `time hh:mm:ss`(소수 초 허용),
+  `depth n`, 인자 없으면 옵션 `TimeMs`(기본 1000). 옵션: `TimeMs`, `TranspositionTableBits`(기본 20 = 24MB).
+  실패는 `err ...`, 불법 수는 `invalidmove ...`, 모든 응답은 `ok`로 끝난다.
+- **uhp-match**: 엔진을 `sh -c`로 띄움. 두 판씩 같은 무작위 시작(기본 4수)으로 색을 바꿔 둔다. 수는 이 크레이트의 규칙으로
+  검증하고, 불법 수·엔진 오류·종료는 그 쪽 패배. 200수 도달은 무승부. Elo 차와 95% 구간을 출력한다.
+- **버전**: `Cargo.toml` 버전 = UHP `id` 버전. 강도에 영향 주는 변경을 커밋할 때 버전을 올리고 `v<버전>` 태그를 단다.
+  비교는 `scripts/version-match.sh worktree v<이전>`으로 하고 결과를 아래 "버전 기록"에 남긴다.
+  UHP 엔진이 없는 v0.4.0 이전 리비전은 빌드 스크립트가 거부한다.
+- **Mzinga 비교**: 세션 환경에는 .NET이 없고 GitHub 릴리스 다운로드가 프록시에서 403이라 못 돌렸다.
+  로컬에서: `uhp-match --a "target/release/hive-uhp" --b "<MzingaEngine 경로>" --games 100 --time-ms 1000`.
+
+## 버전 기록
+`scripts/version-match.sh`(또는 같은 조건의 uhp-match) 결과. A가 새 버전.
+
+| 날짜 | A vs B | 조건 | 결과 |
+|---|---|---|---|
+| 2026-10-12 | v0.4.0 vs v0.4.0 (자기 자신, 기준선) | 20판, 50ms | A 57.5%, Elo +53 ± 141 (잡음 폭 확인용) |
+| 2026-10-12 | v0.4.0 200ms vs v0.4.0 50ms | 20판 | A 77.5%, Elo +215 ± 168 |
 
 ## 성능 기록
 측정 환경: 클라우드 컨테이너(x86_64), `cargo run --release --example perft`.

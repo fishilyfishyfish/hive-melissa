@@ -8,6 +8,7 @@ pub mod hex;
 pub mod json;
 pub mod piece;
 pub mod uhp;
+pub mod uhp_engine;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm;
