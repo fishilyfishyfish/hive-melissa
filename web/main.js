@@ -97,6 +97,10 @@ function renderBoard() {
   const { cells, lastFrom, lastTo } = snap.state;
   const same = (a, q, r) => a && a[0] === q && a[1] === r;
 
+  if (cells.length === 0) {
+    el('polygon', { points: hexPoints(0, 0, R - 4), class: 'origin' }, cellsLayer);
+  }
+
   if (lastFrom && !cells.some((c) => same(lastFrom, c.q, c.r))) {
     const [x, y] = hexToPixel(lastFrom[0], lastFrom[1]);
     el('polygon', { points: hexPoints(x, y, R - 3), class: 'last-from' }, cellsLayer);
@@ -147,12 +151,20 @@ function renderBoard() {
 }
 
 // Refit when the hive grows past the visible area (e.g. after an AI move).
+// Also covers highlighted target cells, so a legal cell is never off-screen.
 function keepInView() {
-  if (pointers.size > 0 || snap.state.cells.length === 0) return;
+  if (pointers.size > 0) return;
   const rect = svg.getBoundingClientRect();
-  const b = cellsLayer.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return;
   const m = 4;
-  if (b.left < rect.left - m || b.top < rect.top - m || b.right > rect.right + m || b.bottom > rect.bottom + m) fit();
+  for (const layer of [cellsLayer, targetsLayer]) {
+    if (!layer.firstChild) continue;
+    const b = layer.getBoundingClientRect();
+    if (b.left < rect.left - m || b.top < rect.top - m || b.right > rect.right + m || b.bottom > rect.bottom + m) {
+      fit();
+      return;
+    }
+  }
 }
 
 function renderHands() {
@@ -208,6 +220,7 @@ function renderStatus() {
     else if (lastAi && s.toMove === human) text += ` · AI 깊이 ${lastAi.depth}, 평가 ${describeScore(lastAi.score)}`;
     if (s.toMove === human && snap.moves.length === 1 && snap.moves[0].uhp === 'pass') text += ' · 둘 곳이 없어 패스해야 한다';
     else if (s.toMove === human && s.turn === 4 && snap.state.hands[human].includes(human[0].toLowerCase() + 'Q')) text += ' · 이번에 여왕벌을 놓아야 한다';
+    else if (s.toMove === human && s.ply < 2 && !selected) text += ' · 아래 손패에서 놓을 말을 고른다';
   }
   setStatus(text);
 }
@@ -365,6 +378,10 @@ $('undo').addEventListener('click', undo);
 $('pass').addEventListener('click', () => play('pass'));
 $('hint').addEventListener('click', showHint);
 $('fit').addEventListener('click', fit);
+// Move list is collapsible (collapsed by default on phones via CSS).
+document.querySelector('.log h2').addEventListener('click', (e) => {
+  if (e.target.id !== 'copy') document.querySelector('.log').classList.toggle('open');
+});
 $('copy').addEventListener('click', async () => {
   if (!snap) return;
   try {
@@ -383,8 +400,11 @@ function applyView() {
 
 function fit() {
   const rect = svg.getBoundingClientRect();
+  // Not laid out yet (or hidden): the ResizeObserver below refits later.
+  if (rect.width === 0 || rect.height === 0) return;
   const cells = snap ? snap.state.cells : [];
   const pts = cells.map((c) => hexToPixel(c.q, c.r));
+  for (const m of selected ? movesOfSelected() : []) pts.push(hexToPixel(m.to[0], m.to[1]));
   if (pts.length === 0) pts.push([0, 0]);
   const xs = pts.map((p) => p[0]);
   const ys = pts.map((p) => p[1]);
@@ -489,10 +509,14 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
+// Refit whenever the board area changes size (first layout, rotation,
+// mobile address bar showing/hiding, panel reflow).
 let resizeTimer = null;
-window.addEventListener('resize', () => {
+const refitSoon = () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(fit, 150);
-});
+  resizeTimer = setTimeout(fit, 100);
+};
+window.addEventListener('resize', refitSoon);
+if (typeof ResizeObserver !== 'undefined') new ResizeObserver(refitSoon).observe(svg);
 
 newGame().catch((e) => setStatus(`엔진을 불러오지 못했다: ${e.message}`));
