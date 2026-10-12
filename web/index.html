@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1d2126">
+  <title>Hive</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="bar">
+    <h1>Hive</h1>
+    <div class="controls">
+      <label class="field">
+        <span>내 색</span>
+        <select id="color">
+          <option value="White">백 (선)</option>
+          <option value="Black">흑 (후)</option>
+        </select>
+      </label>
+      <label class="field check">
+        <input type="checkbox" id="tournament" checked>
+        <span>토너먼트 규칙</span>
+      </label>
+      <button id="new">새 게임</button>
+      <button id="undo">무르기</button>
+      <button id="pass" disabled>패스</button>
+      <button id="fit" title="판 맞춤">맞춤</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="board-wrap">
+      <div id="status" class="status">엔진 불러오는 중…</div>
+      <svg id="board" role="img" aria-label="Hive board">
+        <g id="world">
+          <g id="cells"></g>
+          <g id="targets"></g>
+        </g>
+      </svg>
+    </section>
+
+    <aside class="side">
+      <div class="hand" id="hand-Black">
+        <h2>흑 손패</h2>
+        <div class="pieces"></div>
+      </div>
+      <div class="hand" id="hand-White">
+        <h2>백 손패</h2>
+        <div class="pieces"></div>
+      </div>
+      <div class="log">
+        <h2>기보 <button id="copy" class="small">복사</button></h2>
+        <ol id="moves"></ol>
+      </div>
+    </aside>
+  </main>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>
