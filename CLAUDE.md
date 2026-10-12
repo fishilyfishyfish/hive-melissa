@@ -51,7 +51,7 @@ web/               바닐라 HTML/CSS/JS. 엔진은 Web Worker(worker.js)에서 
   pkg/             wasm-bindgen 출력 (빌드 산출물, 커밋 안 함)
 scripts/build-web.sh         WASM 빌드 → web/pkg
 scripts/build-version.sh     git 리비전의 hive-uhp 빌드 → .versions/<sha>/hive-uhp (캐시, 커밋 안 함)
-scripts/version-match.sh     두 리비전 대국 (예: worktree vs v0.4.0)
+scripts/version-match.sh     두 리비전 대국 (예: worktree vs a30574e)
 .github/workflows/pages.yml  테스트 → WASM 빌드 → GitHub Pages 배포
 ```
 
@@ -79,7 +79,7 @@ cargo run --release --example arena -- t100 t100:ring0 100 4   # A 대 B, 100판
 
 # UHP / 버전 비교
 cargo build --release --bins                     # target/release/hive-uhp, uhp-match
-scripts/version-match.sh worktree v0.4.0 --games 200 --time-ms 100   # 지금 트리 vs 태그
+scripts/version-match.sh worktree a30574e --games 200 --time-ms 100   # 지금 트리 vs v0.4.0
 target/release/uhp-match --a "<엔진 명령>" --b "<엔진 명령>" --games 100 --time-ms-a 200 --time-ms-b 100
 
 rustup target add wasm32-unknown-unknown
@@ -153,13 +153,18 @@ cd web && python3 -m http.server 8000           # http://localhost:8000
   실패는 `err ...`, 불법 수는 `invalidmove ...`, 모든 응답은 `ok`로 끝난다.
 - **uhp-match**: 엔진을 `sh -c`로 띄움. 두 판씩 같은 무작위 시작(기본 4수)으로 색을 바꿔 둔다. 수는 이 크레이트의 규칙으로
   검증하고, 불법 수·엔진 오류·종료는 그 쪽 패배. 200수 도달은 무승부. Elo 차와 95% 구간을 출력한다.
-- **버전**: `Cargo.toml` 버전 = UHP `id` 버전. 강도에 영향 주는 변경을 커밋할 때 버전을 올리고 `v<버전>` 태그를 단다.
-  비교는 `scripts/version-match.sh worktree v<이전>`으로 하고 결과를 아래 "버전 기록"에 남긴다.
+- **버전**: `Cargo.toml` 버전 = UHP `id` 버전. 강도에 영향 주는 변경을 커밋할 때 버전을 올리고 아래 표에 커밋 SHA를 적는다.
+  세션 프록시가 태그 푸시를 막아서(`git push origin v0.4.0`이 "up-to-date"라고 하지만 원격에 안 생김) 태그 대신 SHA로 가리킨다.
+  비교는 `scripts/version-match.sh worktree <이전 SHA>`로 하고 결과를 아래 "버전 기록"에 남긴다.
   UHP 엔진이 없는 v0.4.0 이전 리비전은 빌드 스크립트가 거부한다.
 - **Mzinga 비교**: 세션 환경에는 .NET이 없고 GitHub 릴리스 다운로드가 프록시에서 403이라 못 돌렸다.
   로컬에서: `uhp-match --a "target/release/hive-uhp" --b "<MzingaEngine 경로>" --games 100 --time-ms 1000`.
 
 ## 버전 기록
+| 버전 | 커밋 | 내용 |
+|---|---|---|
+| v0.4.0 | `a30574e` | 3단계 탐색/평가 + UHP 엔진 (첫 UHP 버전, 비교 기준선) |
+
 `scripts/version-match.sh`(또는 같은 조건의 uhp-match) 결과. A가 새 버전.
 
 | 날짜 | A vs B | 조건 | 결과 |
