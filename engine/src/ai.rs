@@ -2,7 +2,7 @@
 //! transposition table, killer and history move ordering).
 
 use crate::board::Board;
-use crate::game::{articulation_points, piece_dests, Game, GameState, Move};
+use crate::game::{ant_reaches, articulation_points, piece_dests, Game, GameState, Move};
 use crate::hex::Hex;
 use crate::piece::{Bug, Color, Piece, NUM_PIECES};
 
@@ -66,6 +66,9 @@ pub struct EvalParams {
     pub own_free_ring_discount: i32,
     /// Count every destination of ants and spiders too (slower, more exact).
     pub full_mobility: bool,
+    /// Per own piece (not yet touching the opponent queen) that can move next
+    /// to it in one move. 0 disables (and skips the extra move generation).
+    pub reach: i32,
 }
 
 impl Default for EvalParams {
@@ -80,6 +83,7 @@ impl Default for EvalParams {
             in_hand: [0, 4, 8, 6, 12],
             own_free_ring_discount: 50,
             full_mobility: false,
+            reach: 20,
         }
     }
 }
@@ -112,6 +116,9 @@ pub fn evaluate(g: &Game, p: &EvalParams) -> i32 {
     for c in [Color::White, Color::Black] {
         let ci = c as usize;
         let s = &mut score[ci];
+        // Ants of one color mostly share the same outer perimeter, so the
+        // first free ant's answer is reused for the others.
+        let mut ant_reach: Option<bool> = None;
         if let Some(oq) = queens[1 - ci] {
             if let Some(top) = b.top(oq) {
                 if top.color() == c && top.bug() == Bug::Beetle {
@@ -139,7 +146,14 @@ pub fn evaluate(g: &Game, p: &EvalParams) -> i32 {
                 }
                 continue;
             }
-            if p.full_mobility || !matches!(bug, Bug::Ant | Bug::Spider) {
+            // Attack potential: real destinations for every bug except ants,
+            // which use an early-exit walk shared by all ants of this color.
+            let wants_reach =
+                p.reach != 0 && queens[1 - ci].is_some() && !adjacent(queens[1 - ci], from);
+            if p.full_mobility
+                || (wants_reach && bug == Bug::Spider)
+                || !matches!(bug, Bug::Ant | Bug::Spider)
+            {
                 piece_dests(b, piece, from, &mut dests);
             } else {
                 // Cheap mobility test: one free slide is enough.
@@ -149,6 +163,17 @@ pub fn evaluate(g: &Game, p: &EvalParams) -> i32 {
                 continue;
             }
             *s += p.free_piece[bug_index(bug)];
+            if wants_reach {
+                let target = |d: Hex| !b.is_occupied(d) && adjacent(queens[1 - ci], d);
+                let hits = if bug == Bug::Ant && !p.full_mobility {
+                    *ant_reach.get_or_insert_with(|| ant_reaches(b, from, target))
+                } else {
+                    dests.iter().any(|&d| target(d))
+                };
+                if hits {
+                    *s += p.reach;
+                }
+            }
             let cap = if bug == Bug::Ant { 30 } else { 6 };
             if p.full_mobility || bug != Bug::Ant && bug != Bug::Spider {
                 *s += p.per_dest * dests.len().min(cap) as i32;
@@ -284,12 +309,19 @@ pub struct Searcher {
     pub use_tt: bool,
     /// Late move reductions.
     pub lmr: bool,
+    /// At the root, cap the score of moves that recreate a position from the
+    /// game at 0 (a draw), so a winning side looks for progress instead of
+    /// shuffling. Root-only on purpose: draw scores inside the tree leak into
+    /// the transposition table and measured weaker.
+    pub repetition: bool,
     tt: Vec<TtEntry>,
     tt_mask: usize,
     killers: [[u32; 2]; MAX_PLY],
     history: Vec<i32>,
     move_bufs: Vec<Vec<Move>>,
     order_buf: Vec<(i32, Move)>,
+    /// Keys of the positions that occurred in the game before the root.
+    seen: Vec<u64>,
     nodes: u64,
     deadline: f64,
     max_nodes: u64,
@@ -303,6 +335,8 @@ impl Searcher {
             params: EvalParams::default(),
             use_tt: true,
             lmr: true,
+            repetition: true,
+            seen: Vec::with_capacity(512),
             tt: vec![EMPTY; 1 << tt_bits],
             tt_mask: (1 << tt_bits) - 1,
             killers: [[0; 2]; MAX_PLY],
@@ -454,9 +488,10 @@ impl Searcher {
         let mut best_move = moves[0];
         for (i, &m) in moves.iter().enumerate() {
             g.apply_fast(m);
+            let child = depth - 1;
             let mut score;
             if i == 0 {
-                score = -self.negamax(g, depth - 1, ply + 1, -beta, -alpha);
+                score = -self.negamax(g, child, ply + 1, -beta, -alpha);
             } else {
                 // Late moves (after the ordered head of the list) are first
                 // searched one ply shallower; a fail-high triggers a re-search.
@@ -465,12 +500,12 @@ impl Searcher {
                 } else {
                     0
                 };
-                score = -self.negamax(g, depth - 1 - reduce, ply + 1, -alpha - 1, -alpha);
+                score = -self.negamax(g, child - reduce, ply + 1, -alpha - 1, -alpha);
                 if reduce > 0 && score > alpha && !self.stop {
-                    score = -self.negamax(g, depth - 1, ply + 1, -alpha - 1, -alpha);
+                    score = -self.negamax(g, child, ply + 1, -alpha - 1, -alpha);
                 }
                 if score > alpha && score < beta && !self.stop {
-                    score = -self.negamax(g, depth - 1, ply + 1, -beta, -alpha);
+                    score = -self.negamax(g, child, ply + 1, -beta, -alpha);
                 }
             }
             g.undo();
@@ -541,6 +576,16 @@ impl Searcher {
         let mut root = g.valid_moves();
         assert!(!root.is_empty(), "search called on a finished game");
 
+        // Positions of the game so far, for repetition detection.
+        self.seen.clear();
+        let mut replay = Game::new(game.tournament());
+        if game.history().len() == game.ply() as usize {
+            for &m in game.history() {
+                self.seen.push(Self::position_key(&replay));
+                replay.apply_fast(m);
+            }
+        }
+
         let mut result = SearchResult {
             best: root[0],
             score: 0,
@@ -578,6 +623,7 @@ impl Searcher {
             let mut iter_best: Option<(Move, i32)> = None;
             for (i, &m) in root.iter().enumerate() {
                 g.apply_fast(m);
+                let repeats = self.repetition && self.seen.contains(&Self::position_key(&g));
                 let mut score;
                 if i == 0 {
                     score = -self.negamax(&mut g, depth as i32 - 1, 1, -beta, -alpha);
@@ -590,6 +636,9 @@ impl Searcher {
                 g.undo();
                 if self.stop {
                     break;
+                }
+                if repeats {
+                    score = score.min(0);
                 }
                 if score > alpha {
                     alpha = score;

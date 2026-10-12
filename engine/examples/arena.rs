@@ -21,8 +21,8 @@ enum Kind {
     Time(f64),
 }
 
-/// `kind[:flag,flag...]`, flags: `nolmr`, `nott`, `fullmob`, `ring<pct>`, `pd<n>`,
-/// `qr<pct>` (scale queen ring), `at<n>`, `bq<n>`, `qf<n>`, `nohand`.
+/// `kind[:flag,flag...]`, flags: `nolmr`, `norep`, `nott`, `fullmob`, `ring<pct>`, `pd<n>`,
+/// `qr<pct>` (scale queen ring), `at<n>`, `bq<n>`, `qf<n>`, `nohand`, `reach<n>`.
 #[derive(Clone, Debug)]
 struct Spec {
     kind: Kind,
@@ -44,6 +44,7 @@ fn searcher(spec: &Spec) -> Searcher {
     for f in &spec.flags {
         match f.as_str() {
             "nolmr" => s.lmr = false,
+            "norep" => s.repetition = false,
             "nott" => s.use_tt = false,
             "fullmob" => s.params.full_mobility = true,
             f if f.starts_with("ring") => s.params.own_free_ring_discount = f[4..].parse().unwrap(),
@@ -57,6 +58,7 @@ fn searcher(spec: &Spec) -> Searcher {
             f if f.starts_with("bq") => s.params.beetle_on_queen = f[2..].parse().unwrap(),
             f if f.starts_with("qf") => s.params.queen_free = f[2..].parse().unwrap(),
             f if f.starts_with("nohand") => s.params.in_hand = [0; 5],
+            f if f.starts_with("reach") => s.params.reach = f[5..].parse().unwrap(),
             f if f.starts_with("pd") => s.params.per_dest = f[2..].parse().unwrap(),
             other => panic!("unknown flag {other}"),
         }

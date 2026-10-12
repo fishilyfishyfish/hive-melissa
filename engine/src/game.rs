@@ -476,6 +476,41 @@ fn beetle_dests(b: &Lifted, from: Hex, out: &mut Vec<Hex>) {
     }
 }
 
+/// Whether an ant lifted from `from` can reach a cell satisfying `goal`.
+/// Same walk as `ant_dests` but stops at the first hit (for evaluation).
+pub(crate) fn ant_reaches(b: &Board, from: Hex, goal: impl Fn(Hex) -> bool) -> bool {
+    let v = Lifted { b, from };
+    let mut seen = [0u64; 1024 / 64];
+    let mut queue = [Hex::ORIGIN; 128];
+    let (mut head, mut tail) = (0, 1);
+    queue[0] = from;
+    let i0 = Board::local_index(from);
+    seen[i0 / 64] |= 1 << (i0 % 64);
+    while head < tail {
+        let cur = queue[head];
+        head += 1;
+        for d in 0..6 {
+            if !can_slide(&v, cur, d) {
+                continue;
+            }
+            let next = cur.step(d);
+            let i = Board::local_index(next);
+            if seen[i / 64] & (1 << (i % 64)) != 0 {
+                continue;
+            }
+            seen[i / 64] |= 1 << (i % 64);
+            if goal(next) {
+                return true;
+            }
+            if tail < queue.len() {
+                queue[tail] = next;
+                tail += 1;
+            }
+        }
+    }
+    false
+}
+
 /// Destinations of the piece on top of `from` (assumed free to move: on top
 /// of its stack and not pinned).
 pub(crate) fn piece_dests(b: &Board, p: Piece, from: Hex, out: &mut Vec<Hex>) {
