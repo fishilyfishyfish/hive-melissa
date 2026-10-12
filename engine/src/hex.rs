@@ -53,6 +53,14 @@ impl Hex {
         ]
     }
 
+    /// Hex distance (number of steps).
+    #[inline]
+    pub fn distance(self, other: Hex) -> i32 {
+        let dq = self.q - other.q;
+        let dr = self.r - other.r;
+        (dq.abs() + dr.abs() + (dq + dr).abs()) / 2
+    }
+
     /// Direction index from `self` to an adjacent `other`, if adjacent.
     pub fn dir_to(self, other: Hex) -> Option<usize> {
         let d = hex(other.q - self.q, other.r - self.r);

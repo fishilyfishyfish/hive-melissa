@@ -108,7 +108,7 @@ pub fn evaluate(g: &Game, p: &EvalParams) -> i32 {
         b.position(Piece::new(Color::White, Bug::Queen, 1)),
         b.position(Piece::new(Color::Black, Bug::Queen, 1)),
     ];
-    let adjacent = |q: Option<Hex>, h: Hex| q.is_some_and(|q| q != h && q.dir_to(h).is_some());
+    let adjacent = |q: Option<Hex>, h: Hex| q.is_some_and(|q| q.distance(h) == 1);
     let mut dests: Vec<Hex> = Vec::with_capacity(64);
     // Own movable pieces touching one's own queen (they can step away).
     let mut own_free_near_queen = [0i32; 2];
@@ -148,8 +148,16 @@ pub fn evaluate(g: &Game, p: &EvalParams) -> i32 {
             }
             // Attack potential: real destinations for every bug except ants,
             // which use an early-exit walk shared by all ants of this color.
-            let wants_reach =
-                p.reach != 0 && queens[1 - ci].is_some() && !adjacent(queens[1 - ci], from);
+            // Spiders reach at most 3 cells away and beetles 1, so a farther
+            // queen cannot be touched next move: skip their walk entirely.
+            let range = match bug {
+                Bug::Spider => 4,
+                Bug::Beetle => 2,
+                _ => i32::MAX,
+            };
+            let wants_reach = p.reach != 0
+                && queens[1 - ci].is_some_and(|q| from.distance(q) <= range)
+                && !adjacent(queens[1 - ci], from);
             if p.full_mobility
                 || (wants_reach && bug == Bug::Spider)
                 || !matches!(bug, Bug::Ant | Bug::Spider)
@@ -309,6 +317,8 @@ pub struct Searcher {
     pub use_tt: bool,
     /// Late move reductions.
     pub lmr: bool,
+    /// First move index (0-based) that gets reduced; 4x this gets 2 plies.
+    pub lmr_start: usize,
     /// At the root, cap the score of moves that recreate a position from the
     /// game at 0 (a draw), so a winning side looks for progress instead of
     /// shuffling. Root-only on purpose: draw scores inside the tree leak into
@@ -320,6 +330,7 @@ pub struct Searcher {
     history: Vec<i32>,
     move_bufs: Vec<Vec<Move>>,
     order_buf: Vec<(i32, Move)>,
+    score_bufs: Vec<Vec<i32>>,
     /// Keys of the positions that occurred in the game before the root.
     seen: Vec<u64>,
     nodes: u64,
@@ -335,6 +346,7 @@ impl Searcher {
             params: EvalParams::default(),
             use_tt: true,
             lmr: true,
+            lmr_start: 6,
             repetition: true,
             seen: Vec::with_capacity(512),
             tt: vec![EMPTY; 1 << tt_bits],
@@ -343,6 +355,7 @@ impl Searcher {
             history: vec![0; NUM_PIECES * Board::CELLS],
             move_bufs: (0..MAX_PLY).map(|_| Vec::with_capacity(128)).collect(),
             order_buf: Vec::with_capacity(256),
+            score_bufs: (0..MAX_PLY).map(|_| Vec::with_capacity(128)).collect(),
             nodes: 0,
             deadline: f64::INFINITY,
             max_nodes: u64::MAX,
@@ -391,18 +404,34 @@ impl Searcher {
     }
 
     /// Orders `moves` in place: TT move, killers, then heuristics + history.
+    /// Fully orders `moves` (used at the root, where every move is searched).
     fn order(&mut self, g: &Game, moves: &mut [Move], tt_move: u32, ply: usize) {
+        let mut scores = std::mem::take(&mut self.score_bufs[ply]);
+        self.score_moves(g, moves, tt_move, ply, &mut scores);
+        let mut keyed = std::mem::take(&mut self.order_buf);
+        keyed.clear();
+        keyed.extend(scores.iter().copied().zip(moves.iter().copied()));
+        // Stable: equal keys keep generation order, so search is deterministic.
+        keyed.sort_by_key(|&(s, _)| std::cmp::Reverse(s));
+        for (dst, &(_, m)) in moves.iter_mut().zip(keyed.iter()) {
+            *dst = m;
+        }
+        self.order_buf = keyed;
+        self.score_bufs[ply] = scores;
+    }
+
+    /// Ordering keys: TT move, killers, then heuristics + history.
+    fn score_moves(&self, g: &Game, moves: &[Move], tt_move: u32, ply: usize, out: &mut Vec<i32>) {
         let b = g.board();
         let me = g.to_move();
         let my_q = b.position(Piece::new(me, Bug::Queen, 1));
         let op_q = b.position(Piece::new(me.opponent(), Bug::Queen, 1));
-        let adj = |q: Option<Hex>, h: Hex| q.is_some_and(|q| q != h && q.dir_to(h).is_some());
+        let adj = |q: Option<Hex>, h: Hex| q.is_some_and(|q| q.distance(h) == 1);
         let k = self.killers.get(ply).copied().unwrap_or([0; 2]);
-        let mut keyed = std::mem::take(&mut self.order_buf);
-        keyed.clear();
-        keyed.extend(moves.iter().map(|&m| {
+        out.clear();
+        out.extend(moves.iter().map(|&m| {
             let code = encode(m);
-            let s = if code == tt_move {
+            if code == tt_move {
                 1 << 30
             } else if code == k[0] || code == k[1] {
                 1 << 24
@@ -427,15 +456,8 @@ impl Searcher {
                     s += self.history[p.0 as usize * Board::CELLS + Board::cell_index(to)];
                 }
                 s
-            };
-            (s, m)
+            }
         }));
-        // Stable: equal keys keep generation order, so search is deterministic.
-        keyed.sort_by_key(|&(s, _)| std::cmp::Reverse(s));
-        for (dst, &(_, m)) in moves.iter_mut().zip(keyed.iter()) {
-            *dst = m;
-        }
-        self.order_buf = keyed;
     }
 
     fn negamax(
@@ -480,13 +502,26 @@ impl Searcher {
         }
 
         let mut moves = std::mem::take(&mut self.move_bufs[ply]);
+        let mut scores = std::mem::take(&mut self.score_bufs[ply]);
         g.generate_moves(&mut moves);
-        self.order(g, &mut moves, tt_move, ply);
+        self.score_moves(g, &moves, tt_move, ply, &mut scores);
 
         let alpha0 = alpha;
         let mut best = -INF;
         let mut best_move = moves[0];
-        for (i, &m) in moves.iter().enumerate() {
+        for i in 0..moves.len() {
+            // Pick the next move lazily (most nodes cut off after a few
+            // moves). Rotating keeps equal keys in generation order, exactly
+            // like a stable sort.
+            let mut j = i;
+            for k in i + 1..scores.len() {
+                if scores[k] > scores[j] {
+                    j = k;
+                }
+            }
+            moves[i..=j].rotate_right(1);
+            scores[i..=j].rotate_right(1);
+            let m = moves[i];
             g.apply_fast(m);
             let child = depth - 1;
             let mut score;
@@ -495,8 +530,8 @@ impl Searcher {
             } else {
                 // Late moves (after the ordered head of the list) are first
                 // searched one ply shallower; a fail-high triggers a re-search.
-                let reduce = if self.lmr && depth >= 3 && i >= 6 {
-                    1 + (i >= 24) as i32
+                let reduce = if self.lmr && depth >= 3 && i >= self.lmr_start {
+                    1 + (i >= self.lmr_start * 4) as i32
                 } else {
                     0
                 };
@@ -511,6 +546,7 @@ impl Searcher {
             g.undo();
             if self.stop {
                 self.move_bufs[ply] = moves;
+                self.score_bufs[ply] = scores;
                 return 0;
             }
             if score > best {
@@ -538,6 +574,7 @@ impl Searcher {
             }
         }
         self.move_bufs[ply] = moves;
+        self.score_bufs[ply] = scores;
 
         if self.use_tt {
             let bound = if best <= alpha0 {

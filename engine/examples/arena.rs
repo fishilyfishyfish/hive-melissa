@@ -22,7 +22,7 @@ enum Kind {
 }
 
 /// `kind[:flag,flag...]`, flags: `nolmr`, `norep`, `nott`, `fullmob`, `ring<pct>`, `pd<n>`,
-/// `qr<pct>` (scale queen ring), `at<n>`, `bq<n>`, `qf<n>`, `nohand`, `reach<n>`.
+/// `qr<pct>` (scale queen ring), `at<n>`, `bq<n>`, `qf<n>`, `nohand`, `reach<n>`, `lmrs<n>`.
 #[derive(Clone, Debug)]
 struct Spec {
     kind: Kind,
@@ -58,6 +58,7 @@ fn searcher(spec: &Spec) -> Searcher {
             f if f.starts_with("bq") => s.params.beetle_on_queen = f[2..].parse().unwrap(),
             f if f.starts_with("qf") => s.params.queen_free = f[2..].parse().unwrap(),
             f if f.starts_with("nohand") => s.params.in_hand = [0; 5],
+            f if f.starts_with("lmrs") => s.lmr_start = f[4..].parse().unwrap(),
             f if f.starts_with("reach") => s.params.reach = f[5..].parse().unwrap(),
             f if f.starts_with("pd") => s.params.per_dest = f[2..].parse().unwrap(),
             other => panic!("unknown flag {other}"),
