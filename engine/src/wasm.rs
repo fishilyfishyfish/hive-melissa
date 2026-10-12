@@ -2,12 +2,14 @@
 
 use wasm_bindgen::prelude::*;
 
+use crate::ai::{SearchLimits, Searcher};
 use crate::game::Game;
 use crate::json;
 
 #[wasm_bindgen]
 pub struct HiveGame {
     g: Game,
+    searcher: Option<Searcher>,
 }
 
 #[wasm_bindgen]
@@ -16,13 +18,14 @@ impl HiveGame {
     pub fn new(tournament: bool) -> HiveGame {
         HiveGame {
             g: Game::new(tournament),
+            searcher: None,
         }
     }
 
     /// Loads a UHP GameString.
     pub fn load(game_string: &str, tournament: bool) -> Result<HiveGame, JsError> {
         Game::from_game_string(game_string, tournament)
-            .map(|g| HiveGame { g })
+            .map(|g| HiveGame { g, searcher: None })
             .map_err(|e| JsError::new(&e))
     }
 
@@ -55,5 +58,25 @@ impl HiveGame {
     #[wasm_bindgen(js_name = gameString)]
     pub fn game_string(&self) -> String {
         self.g.game_string()
+    }
+
+    /// Searches for the best move (does not play it). Returns JSON:
+    /// `{"uhp":..,"score":..,"depth":..,"nodes":..,"ms":..,"pv":[..]}`,
+    /// score from the side to move's point of view.
+    pub fn search(&mut self, time_ms: f64, max_depth: u32) -> Result<String, JsError> {
+        if self.g.state().is_over() {
+            return Err(JsError::new("game is over"));
+        }
+        // 2^18 entries * 24 bytes = 6 MB, kept across moves.
+        let s = self.searcher.get_or_insert_with(|| Searcher::new(18));
+        let r = s.search(
+            &self.g,
+            &SearchLimits {
+                max_depth: max_depth.max(1),
+                time_ms,
+                ..Default::default()
+            },
+        );
+        Ok(json::search_json(&self.g, &r))
     }
 }

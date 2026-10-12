@@ -1,0 +1,682 @@
+//! Evaluation and alpha-beta search (iterative deepening, PVS, Zobrist
+//! transposition table, killer and history move ordering).
+
+use crate::board::Board;
+use crate::game::{articulation_points, piece_dests, Game, GameState, Move};
+use crate::hex::Hex;
+use crate::piece::{Bug, Color, Piece, NUM_PIECES};
+
+pub const WIN: i32 = 100_000;
+const INF: i32 = 1_000_000;
+const MAX_PLY: usize = 128;
+
+// --------------------------------------------------------------------------
+// Clock
+// --------------------------------------------------------------------------
+
+#[cfg(target_arch = "wasm32")]
+mod clock {
+    use wasm_bindgen::prelude::*;
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = Date, js_name = now)]
+        fn date_now() -> f64;
+    }
+    pub fn now_ms() -> f64 {
+        date_now()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod clock {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    pub fn now_ms() -> f64 {
+        START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
+    }
+}
+
+pub use clock::now_ms;
+
+// --------------------------------------------------------------------------
+// Evaluation
+// --------------------------------------------------------------------------
+
+/// Evaluation weights. Units are arbitrary ("centi-bugs"); a won game is
+/// `WIN`. Kept as a struct so the arena can pit variants against each other.
+#[derive(Clone, Debug)]
+pub struct EvalParams {
+    /// Penalty for having `n` occupied cells around one's own queen.
+    pub queen_ring: [i32; 7],
+    /// Bonus for a movable piece, by bug (Q, S, B, G, A).
+    pub free_piece: [i32; 5],
+    /// Bonus per destination for short-range bugs (capped at 6).
+    pub per_dest: i32,
+    /// Own queen can still move.
+    pub queen_free: i32,
+    /// Own beetle sitting on top of the opponent queen.
+    pub beetle_on_queen: i32,
+    /// Per own piece touching the opponent queen.
+    pub attacker: i32,
+    /// Piece still in hand, by bug (Q, S, B, G, A).
+    pub in_hand: [i32; 5],
+    /// How much (percent) an own movable piece next to one's own queen is
+    /// discounted from the queen-ring count.
+    pub own_free_ring_discount: i32,
+    /// Count every destination of ants and spiders too (slower, more exact).
+    pub full_mobility: bool,
+}
+
+impl Default for EvalParams {
+    fn default() -> Self {
+        EvalParams {
+            queen_ring: [0, 15, 40, 90, 170, 320, 0],
+            free_piece: [0, 10, 25, 14, 30],
+            per_dest: 2,
+            queen_free: 25,
+            beetle_on_queen: 60,
+            attacker: 8,
+            in_hand: [0, 4, 8, 6, 12],
+            own_free_ring_discount: 50,
+            full_mobility: false,
+        }
+    }
+}
+
+fn bug_index(b: Bug) -> usize {
+    match b {
+        Bug::Queen => 0,
+        Bug::Spider => 1,
+        Bug::Beetle => 2,
+        Bug::Grasshopper => 3,
+        Bug::Ant => 4,
+    }
+}
+
+/// Static evaluation from the point of view of the side to move.
+/// Terminal positions are not handled here (the search checks them first).
+pub fn evaluate(g: &Game, p: &EvalParams) -> i32 {
+    let b = g.board();
+    let pinned = articulation_points(b);
+    let mut score = [0i32; 2];
+    let queens = [
+        b.position(Piece::new(Color::White, Bug::Queen, 1)),
+        b.position(Piece::new(Color::Black, Bug::Queen, 1)),
+    ];
+    let adjacent = |q: Option<Hex>, h: Hex| q.is_some_and(|q| q != h && q.dir_to(h).is_some());
+    let mut dests: Vec<Hex> = Vec::with_capacity(64);
+    // Own movable pieces touching one's own queen (they can step away).
+    let mut own_free_near_queen = [0i32; 2];
+
+    for c in [Color::White, Color::Black] {
+        let ci = c as usize;
+        let s = &mut score[ci];
+        if let Some(oq) = queens[1 - ci] {
+            if let Some(top) = b.top(oq) {
+                if top.color() == c && top.bug() == Bug::Beetle {
+                    *s += p.beetle_on_queen;
+                }
+            }
+        }
+        for piece in Piece::all().filter(|x| x.color() == c) {
+            let Some(from) = b.position(piece) else {
+                *s += p.in_hand[bug_index(piece.bug())];
+                continue;
+            };
+            if adjacent(queens[1 - ci], from) {
+                *s += p.attacker;
+            }
+            if !b.is_on_top(piece) || (b.height(from) == 1 && pinned.contains(&from)) {
+                continue;
+            }
+            dests.clear();
+            let bug = piece.bug();
+            if bug == Bug::Queen {
+                piece_dests(b, piece, from, &mut dests);
+                if !dests.is_empty() {
+                    *s += p.queen_free;
+                }
+                continue;
+            }
+            if p.full_mobility || !matches!(bug, Bug::Ant | Bug::Spider) {
+                piece_dests(b, piece, from, &mut dests);
+            } else {
+                // Cheap mobility test: one free slide is enough.
+                one_step_slides(b, from, &mut dests);
+            }
+            if dests.is_empty() {
+                continue;
+            }
+            *s += p.free_piece[bug_index(bug)];
+            let cap = if bug == Bug::Ant { 30 } else { 6 };
+            if p.full_mobility || bug != Bug::Ant && bug != Bug::Spider {
+                *s += p.per_dest * dests.len().min(cap) as i32;
+            }
+            if adjacent(queens[ci], from) {
+                own_free_near_queen[ci] += 1;
+            }
+        }
+    }
+    for c in [Color::White, Color::Black] {
+        let ci = c as usize;
+        if let Some(q) = queens[ci] {
+            let ring = q.neighbors().iter().filter(|&&n| b.is_occupied(n)).count() as i32;
+            // Effective ring in tenths: own free pieces count only partially.
+            let eff = (ring * 100 - own_free_near_queen[ci] * p.own_free_ring_discount).max(0);
+            let lo = (eff / 100) as usize;
+            let frac = eff % 100;
+            let lo_v = p.queen_ring[lo.min(6)];
+            let hi_v = p.queen_ring[(lo + 1).min(6)];
+            score[ci] -= lo_v + (hi_v - lo_v) * frac / 100;
+        }
+    }
+    let me = g.to_move() as usize;
+    score[me] - score[1 - me]
+}
+
+fn one_step_slides(b: &Board, from: Hex, out: &mut Vec<Hex>) {
+    // Queen movement == one ground slide.
+    piece_dests(b, Piece::new(Color::White, Bug::Queen, 1), from, out);
+}
+
+// --------------------------------------------------------------------------
+// Transposition table
+// --------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bound {
+    Exact,
+    Lower,
+    Upper,
+}
+
+#[derive(Clone, Copy)]
+struct TtEntry {
+    key: u64,
+    mv: u32,
+    score: i32,
+    depth: i16,
+    bound: Bound,
+}
+
+const EMPTY: TtEntry = TtEntry {
+    key: 0,
+    mv: 0,
+    score: 0,
+    depth: -1,
+    bound: Bound::Exact,
+};
+
+/// Compact move code used by the TT and killer slots.
+fn encode(m: Move) -> u32 {
+    match m {
+        Move::Pass => 3 << 29,
+        Move::Place { piece, to } => {
+            1 << 29 | (piece.0 as u32) << 24 | Board::cell_index(to) as u32
+        }
+        Move::Move { piece, from, to } => {
+            2 << 29
+                | (piece.0 as u32) << 24
+                | (Board::cell_index(from) as u32) << 12
+                | Board::cell_index(to) as u32
+        }
+    }
+}
+
+fn to_tt(score: i32, ply: i32) -> i32 {
+    if score > WIN - 1000 {
+        score + ply
+    } else if score < -WIN + 1000 {
+        score - ply
+    } else {
+        score
+    }
+}
+
+fn from_tt(score: i32, ply: i32) -> i32 {
+    if score > WIN - 1000 {
+        score - ply
+    } else if score < -WIN + 1000 {
+        score + ply
+    } else {
+        score
+    }
+}
+
+// --------------------------------------------------------------------------
+// Search
+// --------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct SearchLimits {
+    pub max_depth: u32,
+    /// Wall-clock budget; the last fully searched depth is used.
+    pub time_ms: f64,
+    pub max_nodes: u64,
+}
+
+impl Default for SearchLimits {
+    fn default() -> Self {
+        SearchLimits {
+            max_depth: 64,
+            time_ms: 1000.0,
+            max_nodes: u64::MAX,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchResult {
+    pub best: Move,
+    /// Score from the side to move's point of view.
+    pub score: i32,
+    /// Deepest fully completed iteration.
+    pub depth: u32,
+    pub nodes: u64,
+    pub elapsed_ms: f64,
+    pub pv: Vec<Move>,
+}
+
+pub struct Searcher {
+    pub params: EvalParams,
+    /// Disable to compare against plain alpha-beta in tests.
+    pub use_tt: bool,
+    /// Late move reductions.
+    pub lmr: bool,
+    tt: Vec<TtEntry>,
+    tt_mask: usize,
+    killers: [[u32; 2]; MAX_PLY],
+    history: Vec<i32>,
+    move_bufs: Vec<Vec<Move>>,
+    order_buf: Vec<(i32, Move)>,
+    nodes: u64,
+    deadline: f64,
+    max_nodes: u64,
+    stop: bool,
+}
+
+impl Searcher {
+    /// `tt_bits`: log2 of the TT entry count (24 bytes each).
+    pub fn new(tt_bits: u32) -> Searcher {
+        Searcher {
+            params: EvalParams::default(),
+            use_tt: true,
+            lmr: true,
+            tt: vec![EMPTY; 1 << tt_bits],
+            tt_mask: (1 << tt_bits) - 1,
+            killers: [[0; 2]; MAX_PLY],
+            history: vec![0; NUM_PIECES * Board::CELLS],
+            move_bufs: (0..MAX_PLY).map(|_| Vec::with_capacity(128)).collect(),
+            order_buf: Vec::with_capacity(256),
+            nodes: 0,
+            deadline: f64::INFINITY,
+            max_nodes: u64::MAX,
+            stop: false,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.tt.fill(EMPTY);
+        self.history.fill(0);
+        self.killers = [[0; 2]; MAX_PLY];
+    }
+
+    fn position_key(g: &Game) -> u64 {
+        let mut k = g.board().hash();
+        if g.to_move() == Color::Black {
+            k ^= 0x5bd1_e995_9d2c_5680;
+        }
+        // Early turns change the legal moves (tournament and turn-4 queen
+        // rules), so they are part of the position.
+        if g.ply() < 8 {
+            k ^= (g.ply() as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+        k
+    }
+
+    fn check_time(&mut self) {
+        if self.nodes >= self.max_nodes || (self.nodes & 511 == 0 && now_ms() >= self.deadline) {
+            self.stop = true;
+        }
+    }
+
+    fn terminal_score(g: &Game, ply: i32) -> Option<i32> {
+        let st = g.state();
+        let winner = match st {
+            GameState::Draw => return Some(0),
+            GameState::WhiteWins => Color::White,
+            GameState::BlackWins => Color::Black,
+            _ => return None,
+        };
+        Some(if winner == g.to_move() {
+            WIN - ply
+        } else {
+            -(WIN - ply)
+        })
+    }
+
+    /// Orders `moves` in place: TT move, killers, then heuristics + history.
+    fn order(&mut self, g: &Game, moves: &mut [Move], tt_move: u32, ply: usize) {
+        let b = g.board();
+        let me = g.to_move();
+        let my_q = b.position(Piece::new(me, Bug::Queen, 1));
+        let op_q = b.position(Piece::new(me.opponent(), Bug::Queen, 1));
+        let adj = |q: Option<Hex>, h: Hex| q.is_some_and(|q| q != h && q.dir_to(h).is_some());
+        let k = self.killers.get(ply).copied().unwrap_or([0; 2]);
+        let mut keyed = std::mem::take(&mut self.order_buf);
+        keyed.clear();
+        keyed.extend(moves.iter().map(|&m| {
+            let code = encode(m);
+            let s = if code == tt_move {
+                1 << 30
+            } else if code == k[0] || code == k[1] {
+                1 << 24
+            } else {
+                let mut s = 0;
+                if let (Some(p), Some(to)) = (m.piece(), m.to()) {
+                    let from = m.from();
+                    let was_on_q = from.is_some_and(|f| adj(op_q, f));
+                    if op_q == Some(to) {
+                        s += 8000; // beetle onto their queen
+                    } else if adj(op_q, to) && !was_on_q {
+                        s += 5000;
+                    } else if was_on_q && !adj(op_q, to) {
+                        s -= 3000;
+                    }
+                    let was_on_mine = from.is_some_and(|f| adj(my_q, f));
+                    if adj(my_q, to) && !was_on_mine && p.bug() != Bug::Queen {
+                        s -= 2000;
+                    } else if was_on_mine && !adj(my_q, to) {
+                        s += 1500;
+                    }
+                    s += self.history[p.0 as usize * Board::CELLS + Board::cell_index(to)];
+                }
+                s
+            };
+            (s, m)
+        }));
+        // Stable: equal keys keep generation order, so search is deterministic.
+        keyed.sort_by_key(|&(s, _)| std::cmp::Reverse(s));
+        for (dst, &(_, m)) in moves.iter_mut().zip(keyed.iter()) {
+            *dst = m;
+        }
+        self.order_buf = keyed;
+    }
+
+    fn negamax(
+        &mut self,
+        g: &mut Game,
+        depth: i32,
+        ply: usize,
+        mut alpha: i32,
+        mut beta: i32,
+    ) -> i32 {
+        self.nodes += 1;
+        self.check_time();
+        if self.stop {
+            return 0;
+        }
+        if let Some(t) = Self::terminal_score(g, ply as i32) {
+            return t;
+        }
+        if depth <= 0 || ply + 1 >= MAX_PLY {
+            return evaluate(g, &self.params);
+        }
+
+        let key = Self::position_key(g);
+        let slot = (key as usize) & self.tt_mask;
+        let mut tt_move = 0;
+        if self.use_tt {
+            let e = self.tt[slot];
+            if e.key == key {
+                tt_move = e.mv;
+                if e.depth as i32 >= depth {
+                    let s = from_tt(e.score, ply as i32);
+                    match e.bound {
+                        Bound::Exact => return s,
+                        Bound::Lower => alpha = alpha.max(s),
+                        Bound::Upper => beta = beta.min(s),
+                    }
+                    if alpha >= beta {
+                        return s;
+                    }
+                }
+            }
+        }
+
+        let mut moves = std::mem::take(&mut self.move_bufs[ply]);
+        g.generate_moves(&mut moves);
+        self.order(g, &mut moves, tt_move, ply);
+
+        let alpha0 = alpha;
+        let mut best = -INF;
+        let mut best_move = moves[0];
+        for (i, &m) in moves.iter().enumerate() {
+            g.apply_fast(m);
+            let mut score;
+            if i == 0 {
+                score = -self.negamax(g, depth - 1, ply + 1, -beta, -alpha);
+            } else {
+                // Late moves (after the ordered head of the list) are first
+                // searched one ply shallower; a fail-high triggers a re-search.
+                let reduce = if self.lmr && depth >= 3 && i >= 6 {
+                    1 + (i >= 24) as i32
+                } else {
+                    0
+                };
+                score = -self.negamax(g, depth - 1 - reduce, ply + 1, -alpha - 1, -alpha);
+                if reduce > 0 && score > alpha && !self.stop {
+                    score = -self.negamax(g, depth - 1, ply + 1, -alpha - 1, -alpha);
+                }
+                if score > alpha && score < beta && !self.stop {
+                    score = -self.negamax(g, depth - 1, ply + 1, -beta, -alpha);
+                }
+            }
+            g.undo();
+            if self.stop {
+                self.move_bufs[ply] = moves;
+                return 0;
+            }
+            if score > best {
+                best = score;
+                best_move = m;
+            }
+            if score > alpha {
+                alpha = score;
+            }
+            if alpha >= beta {
+                let code = encode(m);
+                if !matches!(m, Move::Pass) {
+                    let kk = &mut self.killers[ply];
+                    if kk[0] != code {
+                        kk[1] = kk[0];
+                        kk[0] = code;
+                    }
+                    if let (Some(p), Some(to)) = (m.piece(), m.to()) {
+                        let h =
+                            &mut self.history[p.0 as usize * Board::CELLS + Board::cell_index(to)];
+                        *h = (*h + depth * depth).min(4000);
+                    }
+                }
+                break;
+            }
+        }
+        self.move_bufs[ply] = moves;
+
+        if self.use_tt {
+            let bound = if best <= alpha0 {
+                Bound::Upper
+            } else if best >= beta {
+                Bound::Lower
+            } else {
+                Bound::Exact
+            };
+            let e = &mut self.tt[slot];
+            if e.key != key || depth as i16 >= e.depth {
+                *e = TtEntry {
+                    key,
+                    mv: encode(best_move),
+                    score: to_tt(best, ply as i32),
+                    depth: depth as i16,
+                    bound,
+                };
+            }
+        }
+        best
+    }
+
+    /// Searches the position and returns the best move found.
+    /// Panics if the game is already over.
+    pub fn search(&mut self, game: &Game, limits: &SearchLimits) -> SearchResult {
+        let start = now_ms();
+        self.deadline = start + limits.time_ms;
+        self.max_nodes = limits.max_nodes;
+        self.nodes = 0;
+        self.stop = false;
+        for h in self.history.iter_mut() {
+            *h /= 4;
+        }
+        let mut g = game.clone();
+        let mut root = g.valid_moves();
+        assert!(!root.is_empty(), "search called on a finished game");
+
+        let mut result = SearchResult {
+            best: root[0],
+            score: 0,
+            depth: 0,
+            nodes: 0,
+            elapsed_ms: 0.0,
+            pv: vec![root[0]],
+        };
+        if root.len() == 1 {
+            result.elapsed_ms = now_ms() - start;
+            return result;
+        }
+
+        let key = Self::position_key(&g);
+        for depth in 1..=limits.max_depth.min(MAX_PLY as u32 - 2) {
+            let tt_move = if self.use_tt {
+                let e = self.tt[(key as usize) & self.tt_mask];
+                if e.key == key {
+                    e.mv
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            let tt_move = if depth == 1 {
+                tt_move
+            } else {
+                encode(result.best)
+            };
+            self.order(&g, &mut root, tt_move, 0);
+
+            let mut alpha = -INF;
+            let beta = INF;
+            let mut iter_best: Option<(Move, i32)> = None;
+            for (i, &m) in root.iter().enumerate() {
+                g.apply_fast(m);
+                let mut score;
+                if i == 0 {
+                    score = -self.negamax(&mut g, depth as i32 - 1, 1, -beta, -alpha);
+                } else {
+                    score = -self.negamax(&mut g, depth as i32 - 1, 1, -alpha - 1, -alpha);
+                    if score > alpha && !self.stop {
+                        score = -self.negamax(&mut g, depth as i32 - 1, 1, -beta, -alpha);
+                    }
+                }
+                g.undo();
+                if self.stop {
+                    break;
+                }
+                if score > alpha {
+                    alpha = score;
+                    iter_best = Some((m, score));
+                }
+            }
+            match iter_best {
+                // A partial iteration only counts if it beat the previous best,
+                // which was searched first.
+                Some((m, s)) if !self.stop || m != result.best => {
+                    result.best = m;
+                    result.score = s;
+                    if !self.stop {
+                        result.depth = depth;
+                    }
+                }
+                _ => {}
+            }
+            if self.use_tt {
+                let slot = (key as usize) & self.tt_mask;
+                self.tt[slot] = TtEntry {
+                    key,
+                    mv: encode(result.best),
+                    score: to_tt(result.score, 0),
+                    depth: result.depth as i16,
+                    bound: Bound::Exact,
+                };
+            }
+            if self.stop {
+                break;
+            }
+            // Forced result found: deeper search cannot change it.
+            if result.score.abs() > WIN - 1000 && (WIN - result.score.abs()) as u32 <= depth {
+                break;
+            }
+            if now_ms() - start > limits.time_ms * 0.5 {
+                break; // the next iteration would almost surely not finish
+            }
+        }
+        result.nodes = self.nodes;
+        result.elapsed_ms = now_ms() - start;
+        result.pv = self.principal_variation(&g, result.best, result.depth.max(1) as usize);
+        result
+    }
+
+    fn principal_variation(&self, game: &Game, first: Move, max_len: usize) -> Vec<Move> {
+        let mut g = game.clone();
+        let mut pv = vec![first];
+        g.apply_fast(first);
+        while pv.len() < max_len && self.use_tt {
+            let key = Self::position_key(&g);
+            let e = self.tt[(key as usize) & self.tt_mask];
+            if e.key != key {
+                break;
+            }
+            let Some(m) = g.valid_moves().into_iter().find(|&m| encode(m) == e.mv) else {
+                break;
+            };
+            pv.push(m);
+            g.apply_fast(m);
+        }
+        pv
+    }
+
+    /// Plain negamax without pruning, for testing the search.
+    pub fn minimax(&self, g: &mut Game, depth: i32, ply: i32) -> i32 {
+        if let Some(t) = Self::terminal_score(g, ply) {
+            return t;
+        }
+        if depth == 0 {
+            return evaluate(g, &self.params);
+        }
+        let mut best = -INF;
+        for m in g.valid_moves() {
+            g.apply_fast(m);
+            best = best.max(-self.minimax(g, depth - 1, ply + 1));
+            g.undo();
+        }
+        best
+    }
+
+    /// Fixed-depth alpha-beta score of the root (for tests).
+    pub fn alphabeta_score(&mut self, g: &Game, depth: i32) -> i32 {
+        self.stop = false;
+        self.deadline = f64::INFINITY;
+        self.max_nodes = u64::MAX;
+        let mut g = g.clone();
+        self.negamax(&mut g, depth, 0, -INF, INF)
+    }
+}

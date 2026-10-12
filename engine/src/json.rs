@@ -1,6 +1,7 @@
 //! Hand-written JSON views of the game for the web UI (keeps the WASM build
 //! free of serde).
 
+use crate::ai::SearchResult;
 use crate::game::{Game, Move};
 use crate::hex::Hex;
 use crate::piece::Color;
@@ -79,5 +80,25 @@ pub fn state_json(g: &Game) -> String {
         list(g.history_uhp().iter().map(|s| esc(s))),
         hex_json(last.and_then(Move::from)),
         hex_json(last.and_then(Move::to)),
+    )
+}
+
+/// `{"uhp":..,"score":..,"depth":..,"nodes":..,"ms":..,"pv":[..]}`; the score
+/// is from the point of view of the side to move in `g`.
+pub fn search_json(g: &Game, r: &SearchResult) -> String {
+    let mut pos = g.clone();
+    let mut pv = Vec::new();
+    for &m in &r.pv {
+        pv.push(esc(&move_to_string(&pos, m)));
+        pos.apply_fast(m);
+    }
+    format!(
+        "{{\"uhp\":{},\"score\":{},\"depth\":{},\"nodes\":{},\"ms\":{:.0},\"pv\":{}}}",
+        esc(&move_to_string(g, r.best)),
+        r.score,
+        r.depth,
+        r.nodes,
+        r.elapsed_ms,
+        list(pv)
     )
 }

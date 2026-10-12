@@ -3,7 +3,16 @@
 const R = 36; // hex radius (center to corner) in world units
 const SQ3 = Math.sqrt(3);
 const SVGNS = 'http://www.w3.org/2000/svg';
-const AI_DELAY_MS = 350;
+const AI_DELAY_MS = 250;
+
+const LEVELS = {
+  random: { kind: 'random' },
+  easy: { kind: 'search', timeMs: 1e9, maxDepth: 1 },
+  normal: { kind: 'search', timeMs: 300, maxDepth: 64 },
+  hard: { kind: 'search', timeMs: 1500, maxDepth: 64 },
+  max: { kind: 'search', timeMs: 5000, maxDepth: 64 },
+};
+const WIN = 100000;
 
 const BUG_NAMES = { Q: '여왕벌', S: '거미', B: '딱정벌레', G: '메뚜기', A: '개미' };
 const BUG_ORDER = ['Q', 'S', 'B', 'G', 'A'];
@@ -78,7 +87,8 @@ function render() {
   renderLog();
   renderStatus();
   $('pass').disabled = !(humanTurn() && snap.moves.length === 1 && snap.moves[0].uhp === 'pass');
-  $('undo').disabled = busy || snap.state.ply === 0;
+  $('undo').disabled = (busy && !thinking) || snap.state.ply === 0;
+  $('hint').disabled = !humanTurn() || busy;
 }
 
 function renderBoard() {
@@ -122,9 +132,10 @@ function renderBoard() {
       const [q, r] = m.to;
       const [x, y] = hexToPixel(q, r);
       const occupied = cells.some((c) => c.q === q && c.r === r);
+      const isHint = hint && hint.to && hint.to[0] === q && hint.to[1] === r && hint.piece === selected.piece;
       el('polygon', {
         points: hexPoints(x, y, R - 4),
-        class: occupied ? 'target over' : 'target',
+        class: `${occupied ? 'target over' : 'target'}${isHint ? ' hint' : ''}`,
         'data-q': q,
         'data-r': r,
         'data-target': '1',
@@ -191,8 +202,10 @@ function renderStatus() {
   } else if (s.status === 'Draw') {
     text = '무승부 (양쪽 여왕벌 동시 포위)';
   } else {
-    const who = s.toMove === human ? '내 차례' : 'AI 차례';
+    const who = s.toMove === human ? '내 차례' : thinking ? 'AI 생각 중…' : 'AI 차례';
     text = `${who} · ${COLOR_KO[s.toMove]} ${s.turn}수째`;
+    if (hint) text += ` · 힌트: ${hint.uhp} (깊이 ${hint.depth}, ${describeScore(hint.score)})`;
+    else if (lastAi && s.toMove === human) text += ` · AI 깊이 ${lastAi.depth}, 평가 ${describeScore(lastAi.score)}`;
     if (s.toMove === human && snap.moves.length === 1 && snap.moves[0].uhp === 'pass') text += ' · 둘 곳이 없어 패스해야 한다';
     else if (s.toMove === human && s.turn === 4 && snap.state.hands[human].includes(human[0].toLowerCase() + 'Q')) text += ' · 이번에 여왕벌을 놓아야 한다';
   }
@@ -251,6 +264,7 @@ function onBoardTap(target) {
 
 async function play(uhp) {
   selected = null;
+  hint = null;
   busy = true;
   try {
     snap = await call('play', { move: uhp });
@@ -264,23 +278,61 @@ async function play(uhp) {
 
 // Bumped by new game / undo so a pending AI move from an older position is dropped.
 let generation = 0;
+let thinking = false;
+let lastAi = null; // last search result of the AI
+let hint = null; // { uhp, from, to }
+
+function describeScore(score) {
+  if (score > WIN - 1000) return `${WIN - score}수 안에 승리`;
+  if (score < -WIN + 1000) return `${WIN + score}수 안에 패배`;
+  return `${score > 0 ? '+' : ''}${score}`;
+}
 
 async function maybeAiMove() {
   if (!snap || isOver() || snap.state.toMove === human) return;
   const gen = generation;
   busy = true;
+  thinking = true;
   render();
   await new Promise((res) => setTimeout(res, AI_DELAY_MS));
   if (gen !== generation) return;
-  const next = await call('random');
+  const level = LEVELS[$('level').value];
+  let choice;
+  try {
+    choice = await call('think', { level });
+  } catch (e) {
+    setStatus(`AI 오류: ${e.message}`);
+    thinking = busy = false;
+    return;
+  }
   if (gen !== generation) return;
-  snap = next;
+  thinking = false;
+  lastAi = choice.depth !== undefined ? choice : null;
+  snap = await call('play', { move: choice.uhp });
+  if (gen !== generation) return;
   busy = false;
+  render();
+}
+
+async function showHint() {
+  if (!humanTurn() || busy) return;
+  const gen = generation;
+  busy = true;
+  setStatus('힌트 계산 중…');
+  const r = await call('think', { level: LEVELS.hard });
+  busy = false;
+  if (gen !== generation) return;
+  const m = snap.moves.find((mv) => mv.uhp === r.uhp);
+  hint = m ? { ...m, score: r.score, depth: r.depth } : null;
+  selected = m && m.piece ? { piece: m.piece, from: m.from } : null;
   render();
 }
 
 async function newGame() {
   generation++;
+  thinking = false;
+  lastAi = null;
+  hint = null;
   human = $('color').value;
   selected = null;
   busy = true;
@@ -293,10 +345,14 @@ async function newGame() {
 }
 
 async function undo() {
-  if (busy || !snap || snap.state.ply === 0) return;
+  // Undo may interrupt the AI while it thinks (its answer is then dropped).
+  if ((busy && !thinking) || !snap || snap.state.ply === 0) return;
   selected = null;
+  hint = null;
+  lastAi = null;
   const n = Math.min(snap.state.toMove === human ? 2 : 1, snap.state.ply);
   generation++;
+  thinking = false;
   busy = true;
   snap = await call('undo', { n });
   busy = false;
@@ -307,6 +363,7 @@ async function undo() {
 $('new').addEventListener('click', newGame);
 $('undo').addEventListener('click', undo);
 $('pass').addEventListener('click', () => play('pass'));
+$('hint').addEventListener('click', showHint);
 $('fit').addEventListener('click', fit);
 $('copy').addEventListener('click', async () => {
   if (!snap) return;

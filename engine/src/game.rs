@@ -180,13 +180,22 @@ impl Game {
             return Vec::new();
         }
         let mut out = Vec::with_capacity(128);
-        let mut scratch = self.board.clone();
-        self.gen_placements(&mut out);
-        self.gen_movements(&mut scratch, &mut out);
+        self.generate_moves(&mut out);
+        out
+    }
+
+    /// Appends the legal moves to `out` (cleared first); allocation-free
+    /// apart from `out` growing. Same semantics as `valid_moves`.
+    pub fn generate_moves(&self, out: &mut Vec<Move>) {
+        out.clear();
+        if self.state().is_over() {
+            return;
+        }
+        self.gen_placements(out);
+        self.gen_movements(out);
         if out.is_empty() {
             out.push(Move::Pass);
         }
-        out
     }
 
     /// Next placeable piece of each bug (UHP requires playing copies in order).
@@ -255,7 +264,7 @@ impl Game {
         }
     }
 
-    fn gen_movements(&self, scratch: &mut Board, out: &mut Vec<Move>) {
+    fn gen_movements(&self, out: &mut Vec<Move>) {
         let c = self.to_move();
         if self.board.position(self.queen(c)).is_none() {
             return;
@@ -272,17 +281,8 @@ impl Game {
             if self.board.height(from) == 1 && pinned.contains(&from) {
                 continue; // one-hive rule
             }
-            // Lift the piece so its own cell counts as empty while it travels.
-            scratch.pop(from);
             dests.clear();
-            match p.bug() {
-                Bug::Queen => queen_dests(scratch, from, &mut dests),
-                Bug::Spider => spider_dests(scratch, from, &mut dests),
-                Bug::Ant => ant_dests(scratch, from, &mut dests),
-                Bug::Grasshopper => grasshopper_dests(scratch, from, &mut dests),
-                Bug::Beetle => beetle_dests(scratch, from, &mut dests),
-            }
-            scratch.push(p, from);
+            piece_dests(&self.board, p, from, &mut dests);
             for &to in &dests {
                 out.push(Move::Move { piece: p, from, to });
             }
@@ -342,23 +342,40 @@ impl Game {
 }
 
 // --------------------------------------------------------------------------
-// Movement helpers. `b` has the moving piece already lifted off `from`.
+// Movement helpers. They see the board through `Lifted`, which hides the
+// moving piece from its start cell without mutating or copying the board.
 // --------------------------------------------------------------------------
+
+pub(crate) struct Lifted<'a> {
+    b: &'a Board,
+    from: Hex,
+}
+
+impl Lifted<'_> {
+    #[inline]
+    fn height(&self, h: Hex) -> usize {
+        self.b.height(h) - (h == self.from) as usize
+    }
+    #[inline]
+    fn occ(&self, h: Hex) -> bool {
+        self.height(h) > 0
+    }
+}
 
 /// Ground-level slide from `a` in direction `dir`: the target must be empty
 /// and exactly one of the two shared neighbors occupied (both occupied = gate
 /// too narrow; both empty = the piece would lose contact with the hive).
 #[inline]
-pub(crate) fn can_slide(b: &Board, a: Hex, dir: usize) -> bool {
+fn can_slide(b: &Lifted, a: Hex, dir: usize) -> bool {
     let to = a.step(dir);
-    if b.is_occupied(to) {
+    if b.occ(to) {
         return false;
     }
     let (c1, c2) = a.common_neighbors(dir);
-    b.is_occupied(c1) != b.is_occupied(c2)
+    b.occ(c1) != b.occ(c2)
 }
 
-fn queen_dests(b: &Board, from: Hex, out: &mut Vec<Hex>) {
+fn queen_dests(b: &Lifted, from: Hex, out: &mut Vec<Hex>) {
     for d in 0..6 {
         if can_slide(b, from, d) {
             out.push(from.step(d));
@@ -366,8 +383,8 @@ fn queen_dests(b: &Board, from: Hex, out: &mut Vec<Hex>) {
     }
 }
 
-fn spider_dests(b: &Board, from: Hex, out: &mut Vec<Hex>) {
-    fn walk(b: &Board, path: &mut [Hex; 4], depth: usize, out: &mut Vec<Hex>) {
+fn spider_dests(b: &Lifted, from: Hex, out: &mut Vec<Hex>) {
+    fn walk(b: &Lifted, path: &mut [Hex; 4], depth: usize, out: &mut Vec<Hex>) {
         let cur = path[depth];
         for d in 0..6 {
             if !can_slide(b, cur, d) {
@@ -391,31 +408,44 @@ fn spider_dests(b: &Board, from: Hex, out: &mut Vec<Hex>) {
     walk(b, &mut path, 0, out);
 }
 
-fn ant_dests(b: &Board, from: Hex, out: &mut Vec<Hex>) {
-    let mut seen = vec![from];
-    let mut i = 0;
-    while i < seen.len() {
-        let cur = seen[i];
-        i += 1;
+fn ant_dests(b: &Lifted, from: Hex, out: &mut Vec<Hex>) {
+    // Visited set as a bitset over the board's cell indices.
+    let mut seen = [0u64; 1024 / 64];
+    let mark = |seen: &mut [u64; 1024 / 64], h: Hex| -> bool {
+        let i = Board::local_index(h);
+        let (w, bit) = (i / 64, 1u64 << (i % 64));
+        let fresh = seen[w] & bit == 0;
+        seen[w] |= bit;
+        fresh
+    };
+    mark(&mut seen, from);
+    let start = out.len();
+    let mut i = start;
+    let mut cur = from;
+    loop {
         for d in 0..6 {
             if can_slide(b, cur, d) {
                 let next = cur.step(d);
-                if !seen.contains(&next) {
-                    seen.push(next);
+                if mark(&mut seen, next) {
                     out.push(next);
                 }
             }
         }
+        if i == out.len() {
+            break;
+        }
+        cur = out[i];
+        i += 1;
     }
 }
 
-fn grasshopper_dests(b: &Board, from: Hex, out: &mut Vec<Hex>) {
+fn grasshopper_dests(b: &Lifted, from: Hex, out: &mut Vec<Hex>) {
     for d in 0..6 {
         let mut cur = from.step(d);
-        if !b.is_occupied(cur) {
+        if !b.occ(cur) {
             continue; // must jump over at least one piece
         }
-        while b.is_occupied(cur) {
+        while b.occ(cur) {
             cur = cur.step(d);
         }
         out.push(cur);
@@ -428,7 +458,7 @@ fn grasshopper_dests(b: &Board, from: Hex, out: &mut Vec<Hex>) {
 /// beetle, height(to))`. It cannot pass if both shared neighbors are strictly
 /// taller than `L`. At ground level (`L == 0`) it must also keep contact, i.e.
 /// the ordinary slide rule applies.
-fn beetle_dests(b: &Board, from: Hex, out: &mut Vec<Hex>) {
+fn beetle_dests(b: &Lifted, from: Hex, out: &mut Vec<Hex>) {
     let ha = b.height(from);
     for d in 0..6 {
         let to = from.step(d);
@@ -446,59 +476,109 @@ fn beetle_dests(b: &Board, from: Hex, out: &mut Vec<Hex>) {
     }
 }
 
+/// Destinations of the piece on top of `from` (assumed free to move: on top
+/// of its stack and not pinned).
+pub(crate) fn piece_dests(b: &Board, p: Piece, from: Hex, out: &mut Vec<Hex>) {
+    let v = Lifted { b, from };
+    match p.bug() {
+        Bug::Queen => queen_dests(&v, from, out),
+        Bug::Spider => spider_dests(&v, from, out),
+        Bug::Ant => ant_dests(&v, from, out),
+        Bug::Grasshopper => grasshopper_dests(&v, from, out),
+        Bug::Beetle => beetle_dests(&v, from, out),
+    }
+}
+
+/// Small fixed-capacity set of cells (no allocation). Derefs to a slice.
+#[derive(Clone, Copy, Debug)]
+pub struct CellSet {
+    cells: [Hex; MAX_CELLS],
+    len: usize,
+}
+
+impl std::ops::Deref for CellSet {
+    type Target = [Hex];
+    fn deref(&self) -> &[Hex] {
+        &self.cells[..self.len]
+    }
+}
+
+const MAX_CELLS: usize = 32;
+
 /// Cells whose removal would split the hive (Tarjan's algorithm over occupied
 /// cells). Only meaningful for single-piece stacks: lifting a piece off a
 /// taller stack never empties the cell.
-pub fn articulation_points(b: &Board) -> Vec<Hex> {
-    let cells = b.occupied_cells();
-    let n = cells.len();
-    let mut result = Vec::new();
+pub fn articulation_points(b: &Board) -> CellSet {
+    let mut result = CellSet {
+        cells: [Hex::ORIGIN; MAX_CELLS],
+        len: 0,
+    };
+    // Distinct occupied cells: one per stack, found via its bottom piece.
+    let mut cells = [Hex::ORIGIN; MAX_CELLS];
+    let mut n = 0;
+    for p in Piece::all() {
+        if let Some(h) = b.position(p) {
+            if b.stack(h)[0] == p {
+                cells[n] = h;
+                n += 1;
+            }
+        }
+    }
     if n < 3 {
         return result;
     }
-    let index_of = |h: Hex| cells.iter().position(|&c| c == h);
-    let adj: Vec<Vec<usize>> = cells
-        .iter()
-        .map(|c| {
-            c.neighbors()
-                .iter()
-                .filter_map(|&nb| index_of(nb))
-                .collect()
-        })
-        .collect();
+    let mut local = [u8::MAX; 1024];
+    for (i, &c) in cells[..n].iter().enumerate() {
+        local[Board::local_index(c)] = i as u8;
+    }
+    let mut adj = [[0u8; 6]; MAX_CELLS];
+    let mut deg = [0u8; MAX_CELLS];
+    for i in 0..n {
+        for nb in cells[i].neighbors() {
+            let j = local[Board::local_index(nb)];
+            if j != u8::MAX {
+                adj[i][deg[i] as usize] = j;
+                deg[i] += 1;
+            }
+        }
+    }
 
-    let mut disc = vec![usize::MAX; n];
-    let mut low = vec![0usize; n];
-    let mut is_ap = vec![false; n];
-    let mut timer = 0;
-    // Iterative DFS: (node, parent, next adjacency index).
-    let mut stack: Vec<(usize, usize, usize)> = vec![(0, usize::MAX, 0)];
+    const UNSEEN: u8 = u8::MAX;
+    let mut disc = [UNSEEN; MAX_CELLS];
+    let mut low = [0u8; MAX_CELLS];
+    let mut is_ap = [false; MAX_CELLS];
+    // Iterative DFS stack of (node, parent, next adjacency index).
+    let mut stack = [(0u8, UNSEEN, 0u8); MAX_CELLS];
+    let mut sp = 1;
     disc[0] = 0;
     low[0] = 0;
-    timer += 1;
+    let mut timer = 1u8;
     let mut root_children = 0;
-    while let Some(top) = stack.last_mut() {
-        let (u, parent) = (top.0, top.1);
-        if top.2 < adj[u].len() {
-            let v = adj[u][top.2];
-            top.2 += 1;
-            if disc[v] == usize::MAX {
+    while sp > 0 {
+        let (u, parent, next) = stack[sp - 1];
+        let u = u as usize;
+        if next < deg[u] {
+            stack[sp - 1].2 += 1;
+            let v = adj[u][next as usize] as usize;
+            if disc[v] == UNSEEN {
                 disc[v] = timer;
                 low[v] = timer;
                 timer += 1;
                 if u == 0 {
                     root_children += 1;
                 }
-                stack.push((v, u, 0));
-            } else if v != parent {
+                stack[sp] = (v as u8, u as u8, 0);
+                sp += 1;
+            } else if v as u8 != parent {
                 low[u] = low[u].min(disc[v]);
             }
         } else {
-            stack.pop();
-            if parent != usize::MAX {
-                low[parent] = low[parent].min(low[u]);
-                if parent != 0 && low[u] >= disc[parent] {
-                    is_ap[parent] = true;
+            sp -= 1;
+            if parent != UNSEEN {
+                let pu = parent as usize;
+                low[pu] = low[pu].min(low[u]);
+                if pu != 0 && low[u] >= disc[pu] {
+                    is_ap[pu] = true;
                 }
             }
         }
@@ -508,7 +588,8 @@ pub fn articulation_points(b: &Board) -> Vec<Hex> {
     }
     for i in 0..n {
         if is_ap[i] {
-            result.push(cells[i]);
+            result.cells[result.len] = cells[i];
+            result.len += 1;
         }
     }
     result

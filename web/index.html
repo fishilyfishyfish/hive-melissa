@@ -18,6 +18,16 @@
           <option value="Black">흑 (후)</option>
         </select>
       </label>
+      <label class="field">
+        <span>AI</span>
+        <select id="level">
+          <option value="random">랜덤</option>
+          <option value="easy">쉬움 (1수 앞)</option>
+          <option value="normal">보통 (0.3초)</option>
+          <option value="hard" selected>어려움 (1.5초)</option>
+          <option value="max">최강 (5초)</option>
+        </select>
+      </label>
       <label class="field check">
         <input type="checkbox" id="tournament" checked>
         <span>토너먼트 규칙</span>
@@ -25,6 +35,7 @@
       <button id="new">새 게임</button>
       <button id="undo">무르기</button>
       <button id="pass" disabled>패스</button>
+      <button id="hint">힌트</button>
       <button id="fit" title="판 맞춤">맞춤</button>
     </div>
   </header>

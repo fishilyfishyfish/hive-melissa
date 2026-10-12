@@ -34,13 +34,16 @@ const handlers = {
     const undone = game.undo(n);
     return snapshot({ undone });
   },
-  // Random AI: uniform choice among legal moves.
-  random() {
-    const moves = JSON.parse(game.validMoves());
-    if (moves.length === 0) return snapshot();
-    const m = moves[Math.floor(Math.random() * moves.length)];
-    game.play(m.uhp);
-    return snapshot({ played: m.uhp });
+  // Picks a move without playing it, so a newer request (undo, new game)
+  // queued behind a long search still sees an unchanged game.
+  // level: {kind: 'random'} | {kind: 'search', timeMs, maxDepth}
+  think({ level }) {
+    if (level.kind === 'random') {
+      const moves = JSON.parse(game.validMoves());
+      const m = moves[Math.floor(Math.random() * moves.length)];
+      return { uhp: m.uhp };
+    }
+    return JSON.parse(game.search(level.timeMs, level.maxDepth));
   },
   state() {
     return snapshot();

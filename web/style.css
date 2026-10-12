@@ -257,6 +257,7 @@ button.small { min-height: 32px; padding: 0 10px; font-size: 0.85rem; }
   cursor: pointer;
 }
 .target.over { fill: rgba(76, 195, 138, 0.35); }
+.target.hint { fill: rgba(240, 180, 41, 0.45); stroke: var(--accent); stroke-dasharray: none; stroke-width: 4; }
 
 .last-from {
   fill: none;
