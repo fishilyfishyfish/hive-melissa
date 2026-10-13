@@ -5,6 +5,7 @@
 //! uhp-match --a "<cmd>" --b "<cmd>" [--games 100] [--time-ms 100]
 //!           [--time-ms-a MS] [--time-ms-b MS]
 //!           [--opening 4] [--max-plies 200] [--threads N] [--seed 1]
+//!           [--init-a "cmd;cmd"] [--init-b "cmd;cmd"]
 //! ```
 //!
 //! Colors alternate; each pair of games shares the same random opening
@@ -102,6 +103,10 @@ struct Args {
     max_plies: u32,
     threads: usize,
     seed: u64,
+    /// Commands sent to each engine right after it starts, `;`-separated
+    /// (e.g. `options set MaxHelperThreads None`).
+    init_a: String,
+    init_b: String,
 }
 
 fn parse_args() -> Args {
@@ -117,6 +122,8 @@ fn parse_args() -> Args {
             .map(|n| n.get())
             .unwrap_or(2),
         seed: 1,
+        init_a: String::new(),
+        init_b: String::new(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -139,6 +146,8 @@ fn parse_args() -> Args {
             "--max-plies" => a.max_plies = v.parse().expect("max-plies"),
             "--threads" => a.threads = v.parse().expect("threads"),
             "--seed" => a.seed = v.parse().expect("seed"),
+            "--init-a" => a.init_a = v,
+            "--init-b" => a.init_b = v,
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -275,6 +284,11 @@ fn main() {
             thread::spawn(move || {
                 let mut ea = Engine::start(&args.a).unwrap_or_else(|e| panic!("{e}"));
                 let mut eb = Engine::start(&args.b).unwrap_or_else(|e| panic!("{e}"));
+                for (e, init) in [(&mut ea, &args.init_a), (&mut eb, &args.init_b)] {
+                    for c in init.split(';').map(str::trim).filter(|c| !c.is_empty()) {
+                        e.cmd(c).unwrap_or_else(|why| panic!("init '{c}': {why}"));
+                    }
+                }
                 *names.lock().unwrap() = (ea.name.clone(), eb.name.clone());
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
@@ -297,6 +311,9 @@ fn main() {
                     t.3 += plies as u64;
                     if !record.starts_with("Base;") {
                         t.4.push(format!("game {i}: {record}"));
+                    } else if std::env::var_os("UHP_MATCH_SHOW").is_some() {
+                        let a_side = if i % 2 == 0 { "White" } else { "Black" };
+                        eprintln!("\ngame {i} (A = {a_side}): {record}");
                     }
                     let done = t.0 + t.1 + t.2;
                     eprint!("\r{done}/{}  A {}  B {}  D {}", args.games, t.0, t.1, t.2);
