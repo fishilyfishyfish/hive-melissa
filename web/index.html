@@ -37,6 +37,7 @@
       <button id="pass" disabled>패스</button>
       <button id="hint">힌트</button>
       <button id="fit" title="판 맞춤">맞춤</button>
+      <button id="analyze">분석</button>
     </div>
   </header>
 
@@ -60,6 +61,33 @@
         <h2>백<span class="full">&nbsp;손패</span></h2>
         <div class="pieces"></div>
       </div>
+      <section id="analysis" hidden>
+        <div class="ana-head">
+          <h2>분석</h2>
+          <select id="ana-speed" title="한 수당 분석 시간">
+            <option value="300">빠르게 (수당 0.3초)</option>
+            <option value="1500">꼼꼼히 (수당 1.5초)</option>
+          </select>
+          <button id="ana-close" class="small">닫기</button>
+        </div>
+        <div id="ana-progress" class="ana-progress"></div>
+        <svg id="ana-graph" viewBox="0 0 300 100" preserveAspectRatio="none" role="img" aria-label="형세 그래프"></svg>
+        <div class="ana-legend"><span>위 = 백 유리</span><span>아래 = 흑 유리</span></div>
+        <div class="ana-nav">
+          <button id="ana-first" title="처음">⏮</button>
+          <button id="ana-prev" title="이전 수">◀</button>
+          <span id="ana-pos"></span>
+          <button id="ana-next" title="다음 수">▶</button>
+          <button id="ana-last" title="마지막">⏭</button>
+        </div>
+        <div id="ana-card" class="ana-card"></div>
+        <ol id="ana-moves" class="ana-moves"></ol>
+        <div class="ana-actions">
+          <button id="ana-continue">여기서 이어 두기</button>
+          <button id="ana-import">기보 불러오기</button>
+          <button id="ana-export">기보 저장</button>
+        </div>
+      </section>
       <div class="log">
         <h2>기보 <button id="copy" class="small">복사</button></h2>
         <ol id="moves"></ol>

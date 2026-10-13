@@ -80,3 +80,34 @@ impl HiveGame {
         Ok(json::search_json(&self.g, &r))
     }
 }
+
+thread_local! {
+    /// Searcher reused across analysis calls (keeps its transposition table).
+    static ANALYSIS: std::cell::RefCell<Option<Searcher>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Analyzes `move_uhp` played in the position given by `game_string`
+/// (UHP GameString of the moves before it). Returns `json::report_json`.
+#[wasm_bindgen(js_name = analyzeMove)]
+pub fn analyze_move(
+    game_string: &str,
+    move_uhp: &str,
+    time_ms: f64,
+    tournament: bool,
+) -> Result<String, JsError> {
+    let g = Game::from_game_string(game_string, tournament).map_err(|e| JsError::new(&e))?;
+    let m = crate::uhp::parse_move(&g, move_uhp).map_err(|e| JsError::new(&e))?;
+    ANALYSIS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let s = slot.get_or_insert_with(|| Searcher::new(18));
+        let r = crate::analysis::analyze_move(&g, m, s, time_ms);
+        Ok(json::report_json(&r))
+    })
+}
+
+/// Board snapshot (same shape as `HiveGame.state()`) for a GameString.
+#[wasm_bindgen(js_name = positionState)]
+pub fn position_state(game_string: &str, tournament: bool) -> Result<String, JsError> {
+    let g = Game::from_game_string(game_string, tournament).map_err(|e| JsError::new(&e))?;
+    Ok(json::state_json(&g))
+}

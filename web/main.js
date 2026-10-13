@@ -26,24 +26,32 @@ const targetsLayer = $('targets');
 
 // ------------------------------------------------------------------ worker
 
-const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
-let nextId = 1;
-const pending = new Map();
-worker.onmessage = (e) => {
-  const { id, ok, result, error } = e.data;
-  const p = pending.get(id);
-  pending.delete(id);
-  if (ok) p.resolve(result);
-  else p.reject(new Error(error));
-};
-worker.onerror = (e) => setStatus(`엔진 오류: ${e.message || e}`);
-function call(cmd, args) {
-  const id = nextId++;
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    worker.postMessage({ id, cmd, args });
-  });
+// Returns `call(cmd, args) -> Promise` for a fresh engine worker.
+function startWorker() {
+  const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+  let nextId = 1;
+  const pending = new Map();
+  worker.onmessage = (e) => {
+    const { id, ok, result, error } = e.data;
+    const p = pending.get(id);
+    pending.delete(id);
+    if (ok) p.resolve(result);
+    else p.reject(new Error(error));
+  };
+  worker.onerror = (e) => setStatus(`엔진 오류: ${e.message || e}`);
+  return (cmd, args) => {
+    const id = nextId++;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      worker.postMessage({ id, cmd, args });
+    });
+  };
 }
+
+// The game worker plays; analysis runs in its own worker so long analyses
+// never block moves.
+const call = startWorker();
+const anaCall = startWorker();
 
 // ------------------------------------------------------------------- state
 
@@ -52,6 +60,15 @@ let human = 'White';
 let selected = null; // { piece, from: [q,r] | null }
 let busy = false; // waiting on the engine
 let view = { x: 0, y: 0, k: 1 };
+
+let ana = null; // analysis session, see "analysis" section
+
+// State shown on the board: the game, or the analyzed position.
+function boardState() {
+  if (!ana) return snap.state;
+  const k = ana.showBest ? ana.ply - 1 : ana.ply;
+  return ana.states.get(k) || snap.state;
+}
 
 const pieceColor = (name) => (name[0] === 'w' ? 'White' : 'Black');
 const bugOf = (name) => name[1];
@@ -82,20 +99,36 @@ function el(tag, attrs = {}, parent) {
 
 function render() {
   if (!snap) return;
+  document.body.classList.toggle('analysis', !!ana);
   renderBoard();
   renderHands();
-  renderLog();
-  renderStatus();
+  if (ana) {
+    renderAnalysis();
+  } else {
+    renderLog();
+    renderStatus();
+  }
   $('pass').disabled = !(humanTurn() && snap.moves.length === 1 && snap.moves[0].uhp === 'pass');
   $('undo').disabled = (busy && !thinking) || snap.state.ply === 0;
-  $('hint').disabled = !humanTurn() || busy;
+  $('hint').disabled = !humanTurn() || busy || !!ana;
+  if (ana) {
+    $('pass').disabled = true;
+    $('undo').disabled = true;
+  }
+  $('analyze').classList.toggle('active', !!ana);
 }
 
 function renderBoard() {
   cellsLayer.replaceChildren();
   targetsLayer.replaceChildren();
-  const { cells, lastFrom, lastTo } = snap.state;
+  let { cells, lastFrom, lastTo } = boardState();
   const same = (a, q, r) => a && a[0] === q && a[1] === r;
+  // "Better move" view: show that move's from/to instead of the last move.
+  const best = ana && ana.showBest ? ana.reports[ana.ply - 1] : null;
+  if (best) {
+    lastFrom = best.bestFrom;
+    lastTo = null;
+  }
 
   if (cells.length === 0) {
     el('polygon', { points: hexPoints(0, 0, R - 4), class: 'origin' }, cellsLayer);
@@ -114,7 +147,8 @@ function renderBoard() {
     for (let i = c.stack.length - 1; i > 0; i--) {
       el('polygon', { points: hexPoints(x + i * 3, y + i * 3, R - 2), class: `under ${pieceColor(c.stack[i - 1])}` }, g);
     }
-    const isSel = selected && selected.from && same(selected.from, c.q, c.r);
+    const isSel = (selected && selected.from && same(selected.from, c.q, c.r))
+      || (best && same(best.bestFrom, c.q, c.r));
     const cls = ['piece', pieceColor(top), `bug-${bugOf(top)}`];
     if (isSel) cls.push('selected');
     if (same(lastTo, c.q, c.r)) cls.push('last');
@@ -131,7 +165,11 @@ function renderBoard() {
     title.textContent = c.stack.join(' → ');
   }
 
-  if (selected) {
+  if (best && best.bestTo) {
+    const [x, y] = hexToPixel(best.bestTo[0], best.bestTo[1]);
+    el('polygon', { points: hexPoints(x, y, R - 4), class: 'target hint' }, targetsLayer);
+  }
+  if (selected && !ana) {
     for (const m of movesOfSelected()) {
       const [q, r] = m.to;
       const [x, y] = hexToPixel(q, r);
@@ -171,14 +209,14 @@ function renderHands() {
   for (const color of ['White', 'Black']) {
     const box = document.querySelector(`#hand-${color} .pieces`);
     box.replaceChildren();
-    const hand = snap.state.hands[color];
+    const hand = boardState().hands[color];
     for (const bug of BUG_ORDER) {
       const left = hand.filter((p) => bugOf(p) === bug);
       if (left.length === 0) continue;
       const next = left[0];
       const b = document.createElement('button');
       b.className = `hand-piece ${color} bug-${bug}`;
-      const placeable = color === human && humanTurn() && snap.moves.some((m) => m.piece === next && !m.from);
+      const placeable = !ana && color === human && humanTurn() && snap.moves.some((m) => m.piece === next && !m.from);
       b.disabled = !placeable;
       if (color !== human) b.classList.add('opponent');
       if (selected && selected.piece === next && !selected.from) b.classList.add('selected');
@@ -245,7 +283,7 @@ function selectPiece(piece, from) {
 }
 
 function onBoardTap(target) {
-  if (!snap || !humanTurn() || busy) return;
+  if (!snap || ana || !humanTurn() || busy) return;
   const node = target.closest('[data-q]');
   if (!node) {
     selected = null;
@@ -342,6 +380,7 @@ async function showHint() {
 }
 
 async function newGame() {
+  closeAnalysis();
   generation++;
   thinking = false;
   lastAi = null;
@@ -402,9 +441,9 @@ function fit() {
   const rect = svg.getBoundingClientRect();
   // Not laid out yet (or hidden): the ResizeObserver below refits later.
   if (rect.width === 0 || rect.height === 0) return;
-  const cells = snap ? snap.state.cells : [];
+  const cells = snap ? boardState().cells : [];
   const pts = cells.map((c) => hexToPixel(c.q, c.r));
-  for (const m of selected ? movesOfSelected() : []) pts.push(hexToPixel(m.to[0], m.to[1]));
+  for (const m of selected && !ana ? movesOfSelected() : []) pts.push(hexToPixel(m.to[0], m.to[1]));
   if (pts.length === 0) pts.push([0, 0]);
   const xs = pts.map((p) => p[0]);
   const ys = pts.map((p) => p[1]);
@@ -518,5 +557,286 @@ const refitSoon = () => {
 };
 window.addEventListener('resize', refitSoon);
 if (typeof ResizeObserver !== 'undefined') new ResizeObserver(refitSoon).observe(svg);
+
+
+// ---------------------------------------------------------------- analysis
+//
+// A session analyzes a list of UHP moves move by move in the analysis
+// worker. `ply` k means "the position after k moves"; reports[k - 1]
+// explains move k.
+
+const QUALITY_MARK = {
+  best: '', good: '', fine: '',
+  inaccuracy: '?!', mistake: '?', blunder: '??', 'missed-win': '??',
+};
+let anaGen = 0;
+
+const gameStringOf = (moves, k) => (k === 0 ? 'Base' : `Base;${moves.slice(0, k).join(';')}`);
+
+async function ensureState(k) {
+  if (!ana || ana.states.has(k)) return;
+  const st = await anaCall('position', { gameString: gameStringOf(ana.moves, k), tournament: ana.tournament });
+  if (ana) ana.states.set(k, st);
+}
+
+async function openAnalysis(moves, tournament) {
+  const gen = ++anaGen;
+  selected = null;
+  hint = null;
+  ana = {
+    gen, moves, tournament, ply: moves.length, reports: [], states: new Map(), showBest: false,
+    timeMs: +$('ana-speed').value,
+  };
+  $('analysis').hidden = false;
+  await ensureState(ana.ply);
+  render();
+  fit();
+  runAnalysis(gen);
+}
+
+function closeAnalysis() {
+  anaGen++;
+  ana = null;
+  $('analysis').hidden = true;
+}
+
+async function runAnalysis(gen) {
+  for (let i = 0; i < ana.moves.length; i++) {
+    if (gen !== anaGen) return;
+    if (ana.reports[i]) continue;
+    let r;
+    try {
+      r = await anaCall('analyze', {
+        gameString: gameStringOf(ana.moves, i), move: ana.moves[i], timeMs: ana.timeMs, tournament: ana.tournament,
+      });
+    } catch (e) {
+      if (gen === anaGen) $('ana-progress').textContent = `분석 오류: ${e.message}`;
+      return;
+    }
+    if (gen !== anaGen) return;
+    ana.reports[i] = r;
+    renderAnalysis();
+  }
+}
+
+async function goTo(k) {
+  if (!ana) return;
+  k = Math.max(0, Math.min(ana.moves.length, k));
+  ana.ply = k;
+  ana.showBest = false;
+  await ensureState(k);
+  render();
+  keepInView();
+}
+
+function node(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+function renderAnalysis() {
+  if (!ana) return;
+  const n = ana.moves.length;
+  const done = ana.reports.filter(Boolean).length;
+  $('ana-progress').textContent = done < n ? `분석 중… ${done} / ${n}수` : `분석 완료 (${n}수)`;
+  $('ana-pos').textContent = ana.ply === 0 ? '시작' : `${ana.ply} / ${n}수`;
+  renderGraph();
+  renderCard();
+  renderAnaMoves();
+  const r = ana.reports[ana.ply - 1];
+  if (ana.showBest && r) setStatus(`${ana.ply}수째 대신 더 좋은 수: ${r.bestDesc}`);
+  else if (r) setStatus(`${ana.ply}수 뒤 · ${r.standing}`);
+  else if (ana.ply === 0) setStatus('분석: 시작 국면');
+  else setStatus(`${ana.ply}수 뒤 · 분석 중…`);
+}
+
+function renderGraph() {
+  const g = $('ana-graph');
+  g.replaceChildren();
+  const n = Math.max(ana.moves.length, 1);
+  const x = (k) => (k / n) * 300;
+  const y = (a) => 50 - a * 46;
+  el('line', { x1: 0, y1: 50, x2: 300, y2: 50, class: 'axis' }, g);
+  const pts = [[x(0), y(0)]];
+  ana.reports.forEach((r, i) => { if (r) pts.push([x(i + 1), y(r.advantage)]); });
+  if (pts.length > 1) {
+    const line = pts.map((p) => p.map((v) => v.toFixed(1)).join(',')).join(' ');
+    el('polygon', { points: `${x(0)},50 ${line} ${pts[pts.length - 1][0].toFixed(1)},50`, class: 'area' }, g);
+    el('polyline', { points: line, class: 'curve' }, g);
+  }
+  ana.reports.forEach((r, i) => {
+    if (r && QUALITY_MARK[r.quality]) {
+      el('circle', { cx: x(i + 1), cy: y(r.advantage), r: 2.6, class: `dot q-${r.quality}` }, g);
+    }
+  });
+  el('line', { x1: x(ana.ply), y1: 0, x2: x(ana.ply), y2: 100, class: 'cursor' }, g);
+}
+
+function renderCard() {
+  const card = $('ana-card');
+  card.replaceChildren();
+  if (ana.ply === 0) {
+    card.append(node('p', 'ana-hint', '시작 국면이다. ▶ 버튼이나 아래 기보를 눌러 수를 하나씩 본다.'));
+    return;
+  }
+  const r = ana.reports[ana.ply - 1];
+  const moveNo = `${ana.ply}수째`;
+  if (!r) {
+    card.append(node('p', 'ana-move', `${moveNo}: ${ana.moves[ana.ply - 1]}`));
+    card.append(node('p', 'ana-hint', '이 수는 아직 분석 중이다…'));
+    return;
+  }
+  const head = node('div', 'ana-card-head');
+  head.append(node('span', `q-badge q-${r.quality}`, r.qualityKo));
+  head.append(node('span', 'ana-move', `${moveNo} ${COLOR_KO[r.mover]}: ${r.playedDesc}`));
+  card.append(head);
+  card.append(node('p', 'ana-summary', r.summary));
+  const ul = node('ul', 'ana-reasons');
+  for (const t of r.reasons) ul.append(node('li', '', t));
+  card.append(ul);
+  if (r.showBest) {
+    const box = node('div', 'ana-best');
+    box.append(node('h3', '', '더 좋은 수'));
+    box.append(node('p', 'ana-move', r.bestDesc));
+    const why = node('ul', 'ana-reasons');
+    for (const t of r.bestReasons) why.append(node('li', '', t));
+    box.append(why);
+    if (r.pv.length > 1) {
+      box.append(node('p', 'ana-pv-title', '예상 수순'));
+      const ol = node('ol', 'ana-pv');
+      for (const t of r.pv.slice(0, 6)) ol.append(node('li', '', t));
+      box.append(ol);
+    }
+    const b = node('button', 'small', ana.showBest ? '실제 둔 수로 돌아가기' : '판에서 보기');
+    b.addEventListener('click', async () => {
+      ana.showBest = !ana.showBest;
+      await ensureState(ana.ply - 1);
+      render();
+      keepInView();
+    });
+    box.append(b);
+    card.append(box);
+  } else if (r.best !== r.played) {
+    card.append(node('p', 'ana-alt', `엔진의 1순위는 ${r.bestDesc}였지만 차이는 작다.`));
+  }
+}
+
+function renderAnaMoves() {
+  const ol = $('ana-moves');
+  ol.replaceChildren();
+  for (let i = 0; i < ana.moves.length; i += 2) {
+    const li = node('li');
+    li.append(node('span', 'n', `${i / 2 + 1}.`));
+    for (const j of [i, i + 1]) {
+      if (j >= ana.moves.length) break;
+      const r = ana.reports[j];
+      const b = node('button', `mv${ana.ply === j + 1 ? ' current' : ''}${r ? ` q-${r.quality}` : ' pending'}`);
+      b.textContent = ana.moves[j] + (r ? QUALITY_MARK[r.quality] : '');
+      b.addEventListener('click', () => goTo(j + 1));
+      li.append(b);
+    }
+    ol.append(li);
+  }
+  // Scroll only the move list (not the whole panel) to the current move.
+  const cur = ol.querySelector('.current');
+  if (cur) {
+    const top = cur.offsetTop - ol.offsetTop;
+    if (top < ol.scrollTop || top + cur.offsetHeight > ol.scrollTop + ol.clientHeight) {
+      ol.scrollTop = top - ol.clientHeight / 2;
+    }
+  }
+}
+
+$('analyze').addEventListener('click', () => {
+  if (ana) {
+    closeAnalysis();
+    render();
+    fit();
+  } else if (snap) {
+    openAnalysis(snap.state.history.slice(), snap.state.tournament);
+  }
+});
+$('ana-close').addEventListener('click', () => { closeAnalysis(); render(); fit(); });
+$('ana-first').addEventListener('click', () => goTo(0));
+$('ana-prev').addEventListener('click', () => goTo(ana.ply - 1));
+$('ana-next').addEventListener('click', () => goTo(ana.ply + 1));
+$('ana-last').addEventListener('click', () => goTo(ana.moves.length));
+$('ana-speed').addEventListener('change', () => {
+  if (!ana) return;
+  ana.timeMs = +$('ana-speed').value;
+  ana.reports = [];
+  ana.gen = ++anaGen;
+  render();
+  runAnalysis(ana.gen);
+});
+$('ana-graph').addEventListener('click', (e) => {
+  if (!ana) return;
+  const rect = $('ana-graph').getBoundingClientRect();
+  goTo(Math.round(((e.clientX - rect.left) / rect.width) * ana.moves.length));
+});
+window.addEventListener('keydown', (e) => {
+  if (!ana || e.target.closest('input, select, textarea')) return;
+  if (e.key === 'ArrowLeft') goTo(ana.ply - 1);
+  else if (e.key === 'ArrowRight') goTo(ana.ply + 1);
+});
+
+// Import: a UHP GameString ("Base;InProgress;White[3];wS1;bS1 wS1-;...")
+// or just the moves separated by ';'.
+$('ana-import').addEventListener('click', async () => {
+  const text = prompt('기보(UHP GameString)를 붙여 넣는다.\n예: Base;InProgress;White[3];wS1;bS1 wS1-;wQ -wS1;bQ bS1-');
+  if (!text) return;
+  const parts = text.trim().split(';').map((x) => x.trim()).filter(Boolean);
+  if (parts[0] === 'Base') parts.shift();
+  if (parts.length && /^(NotStarted|InProgress|Draw|WhiteWins|BlackWins)$/.test(parts[0])) parts.shift();
+  if (parts.length && /^(White|Black)\[\d+\]$/.test(parts[0])) parts.shift();
+  const tournament = ana ? ana.tournament : true;
+  try {
+    // Validates every move; throws with the offending move otherwise.
+    await anaCall('position', { gameString: gameStringOf(parts, parts.length), tournament });
+  } catch (e) {
+    alert(`기보를 읽지 못했다: ${e.message}`);
+    return;
+  }
+  await openAnalysis(parts, tournament);
+});
+
+$('ana-export').addEventListener('click', async () => {
+  if (!ana) return;
+  await ensureState(ana.moves.length);
+  const gs = ana.states.get(ana.moves.length).gameString;
+  const blob = new Blob([gs + '\n'], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `hive-${new Date().toISOString().slice(0, 10)}.txt`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  try { await navigator.clipboard.writeText(gs); } catch { /* download is enough */ }
+});
+
+// Continue playing from the shown position, as the side to move.
+$('ana-continue').addEventListener('click', async () => {
+  if (!ana) return;
+  const gameString = gameStringOf(ana.moves, ana.ply);
+  const tournament = ana.tournament;
+  closeAnalysis();
+  generation++;
+  busy = true;
+  try {
+    snap = await call('load', { gameString, tournament });
+  } catch (e) {
+    busy = false;
+    setStatus(`불러오지 못했다: ${e.message}`);
+    return;
+  }
+  busy = false;
+  human = snap.state.toMove;
+  $('color').value = human;
+  lastAi = null;
+  selected = null;
+  render();
+  fit();
+});
 
 newGame().catch((e) => setStatus(`엔진을 불러오지 못했다: ${e.message}`));

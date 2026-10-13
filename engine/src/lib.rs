@@ -2,6 +2,7 @@
 //! apply/undo, game-end detection and UHP notation.
 
 pub mod ai;
+pub mod analysis;
 pub mod board;
 pub mod game;
 pub mod hex;

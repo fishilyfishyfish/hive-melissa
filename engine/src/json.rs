@@ -102,3 +102,33 @@ pub fn search_json(g: &Game, r: &SearchResult) -> String {
         list(pv)
     )
 }
+
+/// Analysis of one move (see `analysis::MoveReport`).
+pub fn report_json(r: &crate::analysis::MoveReport) -> String {
+    use crate::analysis::{advantage, standing_ko};
+    format!(
+        "{{\"mover\":{},\"played\":{},\"playedDesc\":{},\"best\":{},\"bestDesc\":{},\"bestFrom\":{},\"bestTo\":{},\"playedScore\":{},\
+         \"bestScore\":{},\"depth\":{},\"quality\":{},\"qualityKo\":{},\"showBest\":{},\"summary\":{},\"reasons\":{},\
+         \"bestReasons\":{},\"pv\":{},\"afterWhite\":{},\"advantage\":{:.4},\"standing\":{}}}",
+        esc(r.mover.name()),
+        esc(&r.played_uhp),
+        esc(&r.played_desc),
+        esc(&r.best_uhp),
+        esc(&r.best_desc),
+        hex_json(r.best.from()),
+        hex_json(r.best.to()),
+        r.played_score,
+        r.best_score,
+        r.depth,
+        esc(r.quality.key()),
+        esc(r.quality.ko()),
+        r.quality.shows_alternative(),
+        esc(&r.summary),
+        list(r.reasons.iter().map(|s| esc(s))),
+        list(r.best_reasons.iter().map(|s| esc(s))),
+        list(r.pv.iter().map(|s| esc(s))),
+        r.after_white,
+        advantage(r.after_white),
+        esc(&standing_ko(r.after_white)),
+    )
+}
