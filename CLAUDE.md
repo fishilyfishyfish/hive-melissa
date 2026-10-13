@@ -186,8 +186,16 @@ cd web && python3 -m http.server 8000           # http://localhost:8000
   세션 프록시가 태그 푸시를 막아서(`git push origin v0.4.0`이 "up-to-date"라고 하지만 원격에 안 생김) 태그 대신 SHA로 가리킨다.
   비교는 `scripts/version-match.sh worktree <이전 SHA>`로 하고 결과를 아래 "버전 기록"에 남긴다.
   UHP 엔진이 없는 v0.4.0 이전 리비전은 빌드 스크립트가 거부한다.
-- **Mzinga 비교**: 세션 환경에는 .NET이 없고 GitHub 릴리스 다운로드가 프록시에서 403이라 못 돌렸다.
-  로컬에서: `uhp-match --a "target/release/hive-uhp" --b "<MzingaEngine 경로>" --games 100 --time-ms 1000`.
+- **Mzinga 비교**: GitHub 릴리스 다운로드는 프록시에서 403이지만, git 읽기와 apt, nuget은 된다. 소스에서 빌드한다(저장소 밖, 커밋 안 함):
+  ```sh
+  apt-get install -y dotnet-sdk-8.0
+  git clone --depth 1 https://github.com/jonthysell/Mzinga /home/user/ext/Mzinga
+  cd /home/user/ext/Mzinga/src && dotnet publish Mzinga.Engine/Mzinga.Engine.csproj -c Release -o /home/user/ext/mzinga-engine
+  # 공정 조건(1스레드, 상대 차례 생각 끔):
+  engine/target/release/uhp-match --a engine/target/release/hive-uhp --b /home/user/ext/mzinga-engine/MzingaEngine \
+    --init-b "options set MaxHelperThreads None;options set PonderDuringIdle Disabled" --games 100 --time-ms 1000
+  ```
+  Mzinga는 `bestmove time`을 지정한 만큼 다 쓴다(1초 → 실측 약 1.7초, 시작 시간 포함). 종료(`exit`) 때 Mzinga가 예외를 내지만 대국과 무관.
 
 ## 버전 기록
 | 버전 | 커밋 | 내용 |
@@ -207,6 +215,8 @@ cd web && python3 -m http.server 8000           # http://localhost:8000
 | 2026-10-12 | v0.5.0 vs v0.4.0 | 100판, 300ms, seed 7 | A 65.5% (58승 27패 15무), Elo +111 ± 66 |
 | 2026-10-12 | v0.5.1 vs v0.5.0 | 200판, 100ms, seed 3 | A 55.2% (97승 76패 27무), Elo +37 ± 45 (순수 속도 개선이라 손해 불가, 채택) |
 | 2026-10-13 | v0.6.0 vs v0.5.1 | 200판, 300ms, seed 11 | A 56.0% (88승 64패 48무), Elo +42 ± 42 (arena 같은 조건 57.8%와 합쳐 약 +48 ± 30) |
+| 2026-10-13 | v0.6.0 vs **Mzinga v0.16.0** | 100판, 1초, 양쪽 1스레드·ponder 끔, seed 21 | A 99.5% (99승 0패 1무), 평균 42수 |
+| 2026-10-13 | v0.6.0 1초·1스레드 vs **Mzinga** 3초·멀티스레드 | 10판, 한 판씩, seed 33 | A 100% (10승), 평균 43수 |
 
 ## 성능 기록
 측정 환경: 클라우드 컨테이너(x86_64), `cargo run --release --example perft`.
@@ -236,7 +246,8 @@ cd web && python3 -m http.server 8000           # http://localhost:8000
 
 ## 남은 일 / 알려진 문제
 - GitHub Pages: 사용자가 Source를 GitHub Actions로 설정함. (세션 프록시는 `gh api .../pages`를 403으로 막으므로 세션에서 설정 변경 불가)
-- 강도의 절대 기준이 없다. 지금 수치는 전부 자기 대국 상대 비교. Mzinga 등 UHP 엔진과 붙이려면 UHP 엔진 CLI(stdin/stdout) 래퍼가 필요.
+- 외부 기준: Mzinga v0.16.0(기본판)에는 시간 3배를 줘도 전승. Mzinga보다 강한 엔진(예: nokamute, Rust)과는 아직 안 붙여봄.
+  다음 기준으로 삼으려면 같은 방식(git clone + 빌드)으로 시도.
 - 동급 엔진끼리는 200수 안에 안 끝나는 판이 10~20%. 상대가 갇혔는데 왕복만 하던 문제는 v0.5.0 루트 반복 회피로 줄었지만 남아 있다.
 - 남은 최적화: 수 생성의 배치 후보 계산(`occupied_cells`/`Vec` 할당), 평가함수의 단절점 재계산(수 생성과 공유 가능),
   거미 경로 탐색(평가·수 생성 합쳐 약 15%).
