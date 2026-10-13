@@ -74,16 +74,18 @@ pub struct EvalParams {
 impl Default for EvalParams {
     fn default() -> Self {
         EvalParams {
-            queen_ring: [0, 15, 40, 90, 170, 320, 0],
-            free_piece: [0, 10, 25, 14, 30],
+            // Tuned by SPSA at depth 4 (examples/tune.rs, 700 iterations,
+            // 8400 games); see CLAUDE.md "가중치 자동 튜닝".
+            queen_ring: [0, 7, 36, 88, 147, 299, 0],
+            free_piece: [0, 14, 29, 5, 41],
             per_dest: 2,
-            queen_free: 25,
-            beetle_on_queen: 60,
-            attacker: 8,
-            in_hand: [0, 4, 8, 6, 12],
-            own_free_ring_discount: 50,
+            queen_free: 26,
+            beetle_on_queen: 69,
+            attacker: 15,
+            in_hand: [0, 11, 12, 18, 20],
+            own_free_ring_discount: 57,
             full_mobility: false,
-            reach: 20,
+            reach: 26,
         }
     }
 }
