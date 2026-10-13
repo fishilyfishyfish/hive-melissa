@@ -196,6 +196,9 @@ cd web && python3 -m http.server 8000           # http://localhost:8000
     --init-b "options set MaxHelperThreads None;options set PonderDuringIdle Disabled" --games 100 --time-ms 1000
   ```
   Mzinga는 `bestmove time`을 지정한 만큼 다 쓴다(1초 → 실측 약 1.7초, 시작 시간 포함). 종료(`exit`) 때 Mzinga가 예외를 내지만 대국과 무관.
+  결과가 너무 일방적이라 검증함: (1) 끝난 기보 8판을 Mzinga에 `newgame <GameString>`으로 다시 넣으면 모든 수가 합법이고
+  승패 판정도 일치(규칙 구멍으로 이긴 게 아님). (2) Mzinga는 1초에 깊이 4(`ReportIntermediateBestMoves`로 확인),
+  우리는 같은 국면에서 깊이 7 안팎. 7번째 수 무렵 Mzinga 자신의 평가가 이미 대패(-975,127). 격차의 주원인은 탐색 깊이로 본다.
 
 ## 버전 기록
 | 버전 | 커밋 | 내용 |
@@ -217,6 +220,7 @@ cd web && python3 -m http.server 8000           # http://localhost:8000
 | 2026-10-13 | v0.6.0 vs v0.5.1 | 200판, 300ms, seed 11 | A 56.0% (88승 64패 48무), Elo +42 ± 42 (arena 같은 조건 57.8%와 합쳐 약 +48 ± 30) |
 | 2026-10-13 | v0.6.0 vs **Mzinga v0.16.0** | 100판, 1초, 양쪽 1스레드·ponder 끔, seed 21 | A 99.5% (99승 0패 1무), 평균 42수 |
 | 2026-10-13 | v0.6.0 1초·1스레드 vs **Mzinga** 3초·멀티스레드 | 10판, 한 판씩, seed 33 | A 100% (10승), 평균 43수 |
+| 2026-10-13 | v0.6.0 0.3초·1스레드 vs **Mzinga** 10초·멀티스레드 | 4판, 한 판씩, seed 91 | A 100% (4승), 평균 41수 |
 
 ## 성능 기록
 측정 환경: 클라우드 컨테이너(x86_64), `cargo run --release --example perft`.
