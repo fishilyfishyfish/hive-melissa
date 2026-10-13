@@ -353,6 +353,10 @@ pub struct SearchLimits {
     /// Wall-clock budget; the last fully searched depth is used.
     pub time_ms: f64,
     pub max_nodes: u64,
+    /// Root moves to leave out (for listing the next-best moves). With any
+    /// excluded move the root score is always searched, even for a single
+    /// remaining move, and the root is not stored in the TT.
+    pub exclude: Vec<Move>,
 }
 
 impl Default for SearchLimits {
@@ -361,6 +365,7 @@ impl Default for SearchLimits {
             max_depth: 64,
             time_ms: 1000.0,
             max_nodes: u64::MAX,
+            exclude: Vec::new(),
         }
     }
 }
@@ -678,6 +683,9 @@ impl Searcher {
         let mut g = game.clone();
         let mut root = g.valid_moves();
         assert!(!root.is_empty(), "search called on a finished game");
+        let restricted = !limits.exclude.is_empty();
+        root.retain(|m| !limits.exclude.contains(m));
+        assert!(!root.is_empty(), "every root move excluded");
 
         // Positions of the game so far, for repetition detection.
         self.seen.clear();
@@ -697,7 +705,7 @@ impl Searcher {
             elapsed_ms: 0.0,
             pv: vec![root[0]],
         };
-        if root.len() == 1 {
+        if root.len() == 1 && !restricted {
             result.elapsed_ms = now_ms() - start;
             return result;
         }
@@ -760,7 +768,7 @@ impl Searcher {
                 }
                 _ => {}
             }
-            if self.use_tt {
+            if self.use_tt && !restricted {
                 let slot = (key as usize) & self.tt_mask;
                 self.tt[slot] = TtEntry {
                     key,

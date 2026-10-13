@@ -38,6 +38,7 @@
       <button id="hint">힌트</button>
       <button id="fit" title="판 맞춤">맞춤</button>
       <button id="analyze">분석</button>
+      <button id="study-btn" title="빈 판부터 흑백 둘 다 직접 두며 엔진 후보 수를 본다">탐구</button>
     </div>
   </header>
 
@@ -86,6 +87,32 @@
           <button id="ana-continue">여기서 이어 두기</button>
           <button id="ana-import">기보 불러오기</button>
           <button id="ana-export">기보 저장</button>
+        </div>
+      </section>
+      <section id="study" hidden>
+        <div class="ana-head">
+          <h2>탐구</h2>
+          <select id="study-speed" title="후보 계산 시간">
+            <option value="1200">빠르게 (1.2초)</option>
+            <option value="4000">꼼꼼히 (4초)</option>
+          </select>
+          <button id="study-close" class="small">닫기</button>
+        </div>
+        <div class="ana-nav">
+          <button id="study-reset" title="빈 판으로">⏮</button>
+          <button id="study-back" title="한 수 되돌리기">◀</button>
+          <span id="study-pos"></span>
+          <button id="study-fwd" title="되돌린 수 다시 두기">▶</button>
+        </div>
+        <div id="study-standing" class="study-standing"></div>
+        <ul id="study-notes" class="study-notes"></ul>
+        <div id="study-judge" class="ana-card" hidden></div>
+        <h3 class="study-sub">좋은 수 후보 <span id="study-count"></span></h3>
+        <ol id="study-cands" class="study-cands"></ol>
+        <div class="ana-actions">
+          <button id="study-ai">여기서 AI와 두기</button>
+          <button id="study-import">기보 불러오기</button>
+          <button id="study-copy">기보 복사</button>
         </div>
       </section>
       <div class="log">

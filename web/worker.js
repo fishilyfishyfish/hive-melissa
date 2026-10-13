@@ -1,5 +1,5 @@
 // Engine worker: owns the WASM game and answers {id, cmd, args} requests.
-import init, { HiveGame, analyzeMove, positionState } from './pkg/hive_engine.js';
+import init, { HiveGame, analyzeMove, positionState, candidates } from './pkg/hive_engine.js';
 
 const ready = init();
 let game = null;
@@ -51,6 +51,9 @@ const handlers = {
   // Analysis (used by a separate worker instance so games are not blocked).
   analyze({ gameString, move, timeMs, tournament }) {
     return JSON.parse(analyzeMove(gameString, move, timeMs, tournament));
+  },
+  candidates({ gameString, timeMs, count, tournament }) {
+    return JSON.parse(candidates(gameString, timeMs, count, tournament));
   },
   position({ gameString, tournament }) {
     return JSON.parse(positionState(gameString, tournament));

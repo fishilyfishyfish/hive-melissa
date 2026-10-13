@@ -43,9 +43,18 @@ pub fn piece_ko(p: Piece) -> String {
     format!("{} {}", color_ko(p.color()), bug_name(p))
 }
 
+/// The part of `word` a particle attaches to by sound: a trailing
+/// "(...)" is not read ("여왕벌 옆(오른쪽 위)" → "여왕벌 옆").
+fn spoken(word: &str) -> &str {
+    match (word.ends_with(')'), word.rfind('(')) {
+        (true, Some(i)) => word[..i].trim_end(),
+        _ => word,
+    }
+}
+
 /// Whether the word ends in a final consonant (받침), for choosing particles.
 fn has_batchim(word: &str) -> bool {
-    match word.chars().last() {
+    match spoken(word).chars().last() {
         Some(c @ '가'..='힣') => !(c as u32 - '가' as u32).is_multiple_of(28),
         // Digits as read in Korean: 일 이 삼 사 오 육 칠 팔 구 영.
         Some(d @ '0'..='9') => matches!(d, '0' | '1' | '3' | '6' | '7' | '8'),
@@ -55,7 +64,7 @@ fn has_batchim(word: &str) -> bool {
 
 /// Direction particle 으로/로 (ㄹ 받침 also takes 로).
 fn euro(word: &str) -> String {
-    let rieul = match word.chars().last() {
+    let rieul = match spoken(word).chars().last() {
         Some(c @ '가'..='힣') => (c as u32 - '가' as u32) % 28 == 8,
         Some(d) => matches!(d, '1' | '7' | '8'),
         None => false,
@@ -114,6 +123,8 @@ enum Status {
     Covered,
     /// On top and not pinned, but has nowhere to go (blocked in).
     Stuck,
+    /// Its side has not placed the queen yet, so nothing of it can move.
+    Waiting,
 }
 
 struct Facts {
@@ -127,6 +138,8 @@ struct Facts {
     /// Pieces per color that could step next to the opponent queen next
     /// move (not counting ones already touching it).
     reach: [usize; 2],
+    /// Empty cells where each color could place a new piece.
+    spots: [usize; 2],
 }
 
 impl Facts {
@@ -153,6 +166,8 @@ impl Facts {
             dests.clear();
             let s = if !b.is_on_top(p) {
                 Status::Covered
+            } else if queen[ci].is_none() {
+                Status::Waiting
             } else if b.height(h) == 1 && pinned.contains(&h) {
                 Status::Pinned
             } else {
@@ -186,12 +201,42 @@ impl Facts {
             status,
             free,
             reach,
+            spots: drop_spots(g),
         }
     }
 
     fn status(&self, p: Piece) -> Option<Status> {
         self.status.iter().find(|(x, _)| *x == p).map(|&(_, s)| s)
     }
+}
+
+/// Empty cells each color could place on: touching its own pieces only
+/// (top pieces decide a stack's color).
+fn drop_spots(g: &Game) -> [usize; 2] {
+    let b = g.board();
+    let mut empty: Vec<Hex> = b
+        .occupied_cells()
+        .iter()
+        .flat_map(|h| h.neighbors())
+        .filter(|&n| !b.is_occupied(n))
+        .collect();
+    empty.sort();
+    empty.dedup();
+    let mut out = [0; 2];
+    for e in empty {
+        let mut touches = [false; 2];
+        for n in e.neighbors() {
+            if let Some(c) = b.top_color(n) {
+                touches[c as usize] = true;
+            }
+        }
+        match touches {
+            [true, false] => out[0] += 1,
+            [false, true] => out[1] += 1,
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Moves that win on the spot for the side to move.
@@ -231,7 +276,7 @@ fn threats(g: &Game, c: Color) -> Vec<Move> {
 // Describing moves
 // --------------------------------------------------------------------------
 
-/// Where a move lands, in words: "흑 여왕벌 옆", "흑 개미 1 위",
+/// Where a move lands, in words: "흑 여왕벌 옆(오른쪽 위)", "흑 개미 1 위",
 /// "백 메뚜기 1의 왼쪽 아래".
 fn where_ko(g: &Game, m: Move) -> String {
     let b = g.board();
@@ -242,14 +287,18 @@ fn where_ko(g: &Game, m: Move) -> String {
     if let Some(top) = b.top(to) {
         return format!("{} 위", piece_ko(top));
     }
+    if b.piece_count() == 0 {
+        return "판 가운데".to_string();
+    }
     let my_q = b.position(Piece::new(me, Bug::Queen, 1));
     let op_q = b.position(Piece::new(me.opponent(), Bug::Queen, 1));
-    let near = |q: Option<Hex>| q.is_some_and(|q| q.distance(to) == 1);
-    if near(op_q) {
-        return format!("{} 여왕벌 옆", color_ko(me.opponent()));
+    // Which side of the queen, so neighboring candidates read differently.
+    let side = |q: Option<Hex>| q.and_then(|q| q.dir_to(to)).map(dir_ko);
+    if let Some(d) = side(op_q) {
+        return format!("{} 여왕벌 옆({d})", color_ko(me.opponent()));
     }
-    if near(my_q) && m.piece().is_some_and(|p| p.bug() != Bug::Queen) {
-        return "자기 여왕벌 옆".to_string();
+    if let (Some(d), true) = (side(my_q), m.piece().is_some_and(|p| p.bug() != Bug::Queen)) {
+        return format!("자기 여왕벌 옆({d})");
     }
     // Otherwise relative to a neighboring piece (not the one moving).
     for dir in [E, W, NE, NW, SE, SW] {
@@ -437,6 +486,9 @@ pub fn reasons(before: &Game, m: Move) -> Vec<String> {
         }
         let ci = p.color() as usize;
         let sb = fb.status(p);
+        if sa == Status::Waiting || sb == Some(Status::Waiting) {
+            continue;
+        }
         let was_free = sb == Some(Status::Free);
         if sa == Status::Covered && sb != Some(Status::Covered) {
             covered[ci].push(p);
@@ -507,8 +559,41 @@ pub fn reasons(before: &Game, m: Move) -> Vec<String> {
         ));
     }
 
+    // Room to place new pieces (matters most while hands are full). Only
+    // from the third move on, when the "own color only" rule applies.
+    if before.ply() >= 2 {
+        let (b, a) = (fb.spots[mi], fa.spots[mi]);
+        if !before.hand(me).is_empty() && a + 2 <= b {
+            out.push(format!(
+                "자기 말을 새로 놓을 수 있는 자리가 {b}곳에서 {a}곳으로 줄었다."
+            ));
+        } else if !before.hand(me).is_empty() && a >= b + 2 {
+            out.push(format!(
+                "자기 말을 새로 놓을 수 있는 자리가 {b}곳에서 {a}곳으로 늘었다."
+            ));
+        }
+        let (b, a) = (fb.spots[oi], fa.spots[oi]);
+        if !before.hand(op).is_empty() && a + 2 <= b {
+            out.push(format!(
+                "{op_ko}이 새 말을 놓을 수 있는 자리를 {b}곳에서 {a}곳으로 줄였다."
+            ));
+        }
+    }
+
+    // Queen deadline: own fourth move at the latest.
+    if fa.queen[mi].is_none() && before.turn_number() == 3 {
+        out.push(
+            "아직 여왕벌을 놓지 않았다. 다음 자기 차례에는 규칙상 반드시 여왕벌을 놓아야 한다."
+                .to_string(),
+        );
+    }
+
     if out.is_empty() {
         out.push(match m {
+            Move::Place { piece, .. } if before.ply() < 2 => format!(
+                "{} 첫 말로 내놓았다. 아직 판이 작아 차이는 앞으로 놓일 말들에서 생긴다.",
+                josa(bug_ko(piece.bug()), "을", "를")
+            ),
             Move::Place { .. } => {
                 "손패에서 말을 하나 더 판에 내놓았다. 당장 큰 변화는 없다.".to_string()
             }
@@ -872,4 +957,362 @@ fn terminal(g: &Game, me: Color) -> Option<i32> {
         _ => return None,
     };
     Some(if me == Color::White { s } else { -s })
+}
+
+// --------------------------------------------------------------------------
+// Candidate moves (study board)
+// --------------------------------------------------------------------------
+
+/// Piece id, position relative to the shape's corner, stack level.
+pub type ShapeKey = Vec<(u8, i32, i32, u8)>;
+
+/// Position shape up to rotation, reflection and translation: moves that
+/// lead to the same shape are the same move for analysis (all six spots
+/// next to the first piece, for example).
+pub fn shape_key(g: &Game) -> ShapeKey {
+    let b = g.board();
+    let pieces: Vec<(u8, Hex, u8)> = Piece::all()
+        .filter_map(|p| {
+            let h = b.position(p)?;
+            let level = b.stack(h).iter().position(|&x| x == p).unwrap_or(0);
+            Some((p.0, h, level as u8))
+        })
+        .collect();
+    let mut best: Option<ShapeKey> = None;
+    for t in 0..12 {
+        let moved: Vec<(u8, Hex, u8)> = pieces
+            .iter()
+            .map(|&(id, h, l)| {
+                let mut x = if t >= 6 { Hex { q: h.r, r: h.q } } else { h };
+                for _ in 0..t % 6 {
+                    x = Hex {
+                        q: -x.r,
+                        r: x.q + x.r,
+                    };
+                }
+                (id, x, l)
+            })
+            .collect();
+        let origin = moved
+            .iter()
+            .map(|&(_, h, _)| h)
+            .min()
+            .unwrap_or(Hex::ORIGIN);
+        let key: ShapeKey = moved
+            .iter()
+            .map(|&(id, h, l)| (id, h.q - origin.q, h.r - origin.r, l))
+            .collect();
+        if best.as_ref().is_none_or(|b| key < *b) {
+            best = Some(key);
+        }
+    }
+    best.unwrap_or_default()
+}
+
+/// What a piece does, for placing it (rules, not opinions).
+pub fn piece_note(bug: Bug) -> &'static str {
+    match bug {
+        Bug::Queen => "여왕벌은 한 번에 한 칸만 움직인다. 이 말의 여섯 면이 모두 막히면 진다.",
+        Bug::Spider => "거미는 벌집 둘레를 따라 정확히 세 칸 움직인다. 갈 수 있는 자리가 몇 곳으로 정해져 있다.",
+        Bug::Beetle => "딱정벌레는 한 칸씩 움직이지만 다른 말 위로 올라탈 수 있다. 깔린 말은 움직이지 못한다.",
+        Bug::Grasshopper => "메뚜기는 일직선으로 말을 뛰어넘어 첫 빈칸에 내린다. 좁은 틈도 건너뛴다.",
+        Bug::Ant => "개미는 벌집 둘레라면 어디로든 갈 수 있다. 가장 자유롭게 움직이는 말이다.",
+    }
+}
+
+pub struct Candidate {
+    pub mv: Move,
+    pub uhp: String,
+    pub desc: String,
+    /// UHP strings of moves with the same resulting shape (including `uhp`).
+    pub same: Vec<String>,
+    /// From the mover's point of view.
+    pub score: i32,
+    pub depth: u32,
+    /// How it compares with the first candidate, in words.
+    pub gap: String,
+    pub reasons: Vec<String>,
+    /// Why the first candidate is better (only when clearly better).
+    pub vs_best: Vec<String>,
+    pub note: Option<String>,
+    /// The mover's next move in the expected line and what it achieves.
+    pub plan: Option<(String, Vec<String>)>,
+    pub pv: Vec<String>,
+    pub after_white: i32,
+}
+
+pub struct Candidates {
+    pub to_move: Color,
+    /// Best score from White's point of view.
+    pub score_white: i32,
+    pub notes: Vec<String>,
+    pub legal: usize,
+    /// Legal moves after merging same-shape ones.
+    pub distinct: usize,
+    pub list: Vec<Candidate>,
+}
+
+fn gap_ko(best: i32, s: i32) -> String {
+    let loss = best - s;
+    if is_win(s) {
+        let n = mate_moves(s);
+        return if n <= 1 {
+            "바로 이기는 수".to_string()
+        } else {
+            format!("이 수부터 {n}수 안에 이길 수 있다")
+        };
+    }
+    if is_loss(s) {
+        return format!(
+            "이 수를 두면 상대가 정확히 둘 때 {}수 안에 진다",
+            mate_moves(s)
+        );
+    }
+    if is_win(best) {
+        return "1순위는 이기는 수라 이 수는 그보다 못하다".to_string();
+    }
+    if loss <= 10 {
+        "1순위와 사실상 같다"
+    } else if loss < 40 {
+        "1순위보다 아주 조금 못하다"
+    } else if loss < 100 {
+        "1순위보다 조금 못하다"
+    } else if loss < 250 {
+        "1순위보다 분명히 못하다"
+    } else {
+        "1순위보다 크게 못하다"
+    }
+    .to_string()
+}
+
+/// Reasons that say nothing happened.
+fn is_filler(r: &str) -> bool {
+    r.contains("당장 큰 변화는 없다")
+        || r.contains("당장 눈에 띄는 변화는 없다")
+        || r.contains("첫 말로 내놓았다")
+        || r.starts_with("둘 수 있는 수가 없어")
+}
+
+/// The mover's next move in `pv` (after the reply) and its reasons, if it
+/// achieves something visible.
+fn plan_of(g: &Game, pv: &[Move]) -> Option<(String, Vec<String>)> {
+    if pv.len() < 3 {
+        return None;
+    }
+    let mut x = g.clone();
+    for &m in &pv[..2] {
+        x.apply_fast(m);
+        if x.state().is_over() {
+            return None;
+        }
+    }
+    let rs: Vec<String> = reasons(&x, pv[2])
+        .into_iter()
+        .filter(|r| !is_filler(r))
+        .take(2)
+        .collect();
+    if rs.is_empty() {
+        return None;
+    }
+    Some((describe_move(&x, pv[2]), rs))
+}
+
+/// General facts about the position for the side to move.
+fn position_notes(g: &Game) -> Vec<String> {
+    let me = g.to_move();
+    let op = me.opponent();
+    let op_ko = color_ko(op);
+    let mut out = Vec::new();
+    if g.ply() == 0 {
+        out.push(
+            "판이 비어 있어 첫 말은 어디에 놓아도 모양이 같다. 고를 것은 어떤 말을 먼저 내느냐뿐이다."
+                .to_string(),
+        );
+        if g.tournament() {
+            out.push("토너먼트 규칙이라 첫 수에는 여왕벌을 놓을 수 없다.".to_string());
+        }
+    } else if g.ply() == 1 {
+        out.push(
+            "첫 말 옆 여섯 자리는 돌려 보면 모두 같은 모양이다. 그래서 후보는 어떤 말을 내느냐로만 갈린다."
+                .to_string(),
+        );
+        if g.tournament() {
+            out.push("토너먼트 규칙이라 첫 수에는 여왕벌을 놓을 수 없다.".to_string());
+        }
+    } else if g.ply() == 2 || g.ply() == 3 {
+        out.push(
+            "이제부터 새 말은 자기 색 말에만 닿게 놓아야 한다 (상대 말에 닿으면 안 된다)."
+                .to_string(),
+        );
+    }
+    let queen_in_hand = g.board().position(g.queen(me)).is_none();
+    if queen_in_hand && g.ply() >= 2 {
+        if g.turn_number() >= 4 {
+            out.push("이번 수에는 규칙상 반드시 여왕벌을 놓아야 한다 (4번째 수까지).".to_string());
+        } else {
+            out.push(format!(
+                "여왕벌을 놓기 전에는 판 위의 자기 말을 움직일 수 없다. 늦어도 {}수 뒤(자기 4번째 수)까지는 놓아야 한다.",
+                4 - g.turn_number()
+            ));
+        }
+    }
+    if !winning_moves(g).is_empty() {
+        out.push("지금 바로 이기는 수가 있다.".to_string());
+    } else if !threats(g, op).is_empty() {
+        out.push(format!(
+            "{op_ko}이 다음 수에 이길 수 있는 수가 있다. 이번 수에 막지 않으면 진다."
+        ));
+    }
+    out
+}
+
+/// Score of `m` from the mover's view by searching the position after it.
+fn score_after(g: &Game, m: Move, searcher: &mut Searcher, time_ms: f64) -> (i32, Vec<Move>) {
+    let me = g.to_move();
+    let mut after = g.clone();
+    after.apply_fast(m);
+    if let Some(t) = terminal(&after, me) {
+        return (t, vec![m]);
+    }
+    let r = searcher.search(
+        &after,
+        &SearchLimits {
+            time_ms,
+            ..Default::default()
+        },
+    );
+    let mut pv = vec![m];
+    pv.extend(r.pv);
+    (-r.score, pv)
+}
+
+/// The `n` best moves of the position (same-shape moves merged), each with
+/// plain-language reasons. `time_ms` is the total budget.
+pub fn candidates(g: &Game, searcher: &mut Searcher, time_ms: f64, n: usize) -> Candidates {
+    let me = g.to_move();
+    let white = |s: i32| if me == Color::White { s } else { -s };
+    let moves = if g.state().is_over() {
+        Vec::new()
+    } else {
+        g.valid_moves()
+    };
+
+    // Group legal moves by resulting shape, keeping move order.
+    let mut groups: Vec<(ShapeKey, Vec<Move>)> = Vec::new();
+    let mut x = g.clone();
+    for &m in &moves {
+        x.apply_fast(m);
+        let k = shape_key(&x);
+        x.undo();
+        match groups.iter_mut().find(|(gk, _)| *gk == k) {
+            Some((_, ms)) => ms.push(m),
+            None => groups.push((k, vec![m])),
+        }
+    }
+
+    let count = n.min(groups.len());
+    let per = time_ms / count.max(1) as f64;
+    let mut found: Vec<(Move, i32, u32, Vec<Move>, usize)> = Vec::new();
+    let mut exclude: Vec<Move> = Vec::new();
+    for _ in 0..count {
+        let (m, score, depth, pv) = if moves.len() == 1 {
+            let (s, pv) = score_after(g, moves[0], searcher, per);
+            (moves[0], s, 0, pv)
+        } else {
+            let r = searcher.search(
+                g,
+                &SearchLimits {
+                    time_ms: per,
+                    exclude: exclude.clone(),
+                    ..Default::default()
+                },
+            );
+            (r.best, r.score, r.depth, r.pv)
+        };
+        // The TT can lose the line's tail; re-read it from the child.
+        let pv = if pv.len() < 3 && depth >= 3 && moves.len() > 1 {
+            score_after(g, m, searcher, per / 4.0).1
+        } else {
+            pv
+        };
+        let gi = groups.iter().position(|(_, ms)| ms.contains(&m)).unwrap();
+        exclude.extend(groups[gi].1.iter().copied());
+        found.push((m, score, depth, pv, gi));
+    }
+    // Later searches can come out deeper; order by what was found.
+    found.sort_by_key(|f| -f.1);
+
+    let best = found.first().map(|f| (f.0, f.1));
+    let list = found
+        .into_iter()
+        .enumerate()
+        .map(|(i, (m, score, depth, pv, gi))| {
+            let (best_m, best_s) = best.unwrap();
+            let vs_best = if i > 0 && best_s - score >= 40 {
+                let mut v = compare(g, m, best_m);
+                v.retain(|r| !r.starts_with("당장 판에서 보이는 차이는 크지 않다"));
+                if v.is_empty() {
+                    v.push(
+                        "판에서 바로 보이는 차이는 없고, 엔진이 몇 수 앞을 읽어 본 결과 차이가 난다."
+                            .to_string(),
+                    );
+                }
+                v
+            } else {
+                Vec::new()
+            };
+            let mut pv_game = g.clone();
+            let mut pv_ko = Vec::new();
+            for &pm in &pv {
+                if pv_game.state().is_over() {
+                    break;
+                }
+                pv_ko.push(short_move(&pv_game, pm));
+                pv_game.apply_fast(pm);
+            }
+            Candidate {
+                mv: m,
+                uhp: move_to_string(g, m),
+                desc: describe_move(g, m),
+                same: groups[gi].1.iter().map(|&x| move_to_string(g, x)).collect(),
+                score,
+                depth,
+                gap: if i == 0 {
+                    if is_win(score) {
+                        gap_ko(score, score)
+                    } else {
+                        "엔진 1순위".to_string()
+                    }
+                } else {
+                    gap_ko(best_s, score)
+                },
+                reasons: {
+                    let mut rs = reasons(g, m);
+                    // The best move with no visible effect: say why it is first.
+                    if i == 0 && rs.len() == 1 && is_filler(&rs[0]) && !rs[0].contains("첫 말로") {
+                        rs[0] = "판에서 바로 보이는 효과는 없지만, 엔진이 몇 수 앞까지 읽어 보면 이 수가 가장 좋은 결과로 이어진다 (예상 수순 참고)."
+                            .to_string();
+                    }
+                    rs
+                },
+                vs_best,
+                note: match m {
+                    Move::Place { piece, .. } => Some(piece_note(piece.bug()).to_string()),
+                    _ => None,
+                },
+                plan: plan_of(g, &pv),
+                pv: pv_ko,
+                after_white: white(score),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Candidates {
+        to_move: me,
+        score_white: list.first().map_or(0, |c| c.after_white),
+        notes: position_notes(g),
+        legal: moves.len(),
+        distinct: groups.len(),
+        list,
+    }
 }

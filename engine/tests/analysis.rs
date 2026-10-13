@@ -2,7 +2,8 @@
 
 use hive_engine::ai::Searcher;
 use hive_engine::analysis::{
-    analyze_move, describe_move, josa, piece_ko, reasons, standing_ko, Quality,
+    analyze_move, candidates, describe_move, josa, piece_ko, reasons, shape_key, standing_ko,
+    Quality,
 };
 use hive_engine::{Game, Hex, Move, Piece};
 
@@ -165,4 +166,69 @@ fn standings_read_naturally() {
     assert_eq!(standing_ko(0), "형세가 비슷하다");
     assert_eq!(standing_ko(100), "백이 약간 유리하다");
     assert_eq!(standing_ko(-500), "흑이 크게 유리하다");
+}
+
+#[test]
+fn same_shape_moves_are_merged() {
+    // Empty board: four bugs (no queen under tournament rules), one spot.
+    let g = Game::new(true);
+    let mut s = Searcher::new(14);
+    let c = candidates(&g, &mut s, 200.0, 5);
+    assert_eq!((c.legal, c.distinct, c.list.len()), (4, 4, 4));
+    assert!(c.notes.iter().any(|n| n.contains("여왕벌을 놓을 수 없다")));
+    assert!(c.list[0].desc.contains("판 가운데"), "{}", c.list[0].desc);
+
+    // Second move: six spots around the first piece are all the same shape.
+    let mut g = Game::new(true);
+    g.play_uhp("wS1").unwrap();
+    let c = candidates(&g, &mut s, 200.0, 5);
+    assert_eq!((c.legal, c.distinct, c.list.len()), (24, 4, 4));
+    assert!(c.list.iter().all(|x| x.same.len() == 6));
+    let bugs: std::collections::HashSet<_> = c.list.iter().map(|x| &x.uhp[..2]).collect();
+    assert_eq!(bugs.len(), 4, "one candidate per bug");
+}
+
+#[test]
+fn shape_key_ignores_rotation_and_translation() {
+    let a = game(&[("wS1", 0, 0), ("bS1", 1, 0), ("wQ", -1, 0)], 3);
+    // Rotated by 60 degrees and moved.
+    let b = game(&[("wS1", 5, 5), ("bS1", 5, 6), ("wQ", 5, 4)], 3);
+    // Bent shape: different.
+    let c = game(&[("wS1", 0, 0), ("bS1", 1, 0), ("wQ", 0, -1)], 3);
+    assert_eq!(shape_key(&a), shape_key(&b));
+    assert_ne!(shape_key(&a), shape_key(&c));
+}
+
+#[test]
+fn candidates_lead_with_the_win_and_rank_the_rest() {
+    let g = mate_in_one();
+    let mut s = Searcher::new(14);
+    let c = candidates(&g, &mut s, 400.0, 3);
+    assert_eq!(c.list.len(), 3);
+    assert_eq!(c.list[0].mv, mv(&g, "wA2", (0, 1)));
+    assert_eq!(c.list[0].gap, "바로 이기는 수");
+    assert!(c.notes.iter().any(|n| n.contains("바로 이기는 수가 있다")));
+    // The others are different shapes, ranked below, and explain the gap.
+    assert!(c.list[1].score <= c.list[0].score && c.list[2].score <= c.list[1].score);
+    assert!(!c.list[1].vs_best.is_empty());
+    assert_ne!(c.list[1].uhp, c.list[0].uhp);
+}
+
+#[test]
+fn pieces_wait_for_the_queen() {
+    // Before White's queen is down, nothing white "gets freed" or "locked".
+    let mut g = Game::new(true);
+    g.play_uhp("wS1").unwrap();
+    for m in g.valid_moves() {
+        let rs = reasons(&g, m);
+        assert!(!has(&rs, "풀어 줬다") && !has(&rs, "묶었다"), "{rs:?}");
+    }
+    // Third own move without the queen: the deadline is stated.
+    let g = Game::from_game_string("Base;wS1;bS1 wS1-;wA1 -wS1;bA1 bS1-", true).unwrap();
+    let m = mv(&g, "wG1", (-2, 1));
+    assert!(
+        has(&reasons(&g, m), "반드시 여왕벌을 놓아야 한다"),
+        "{:?}",
+        reasons(&g, m)
+    );
 }

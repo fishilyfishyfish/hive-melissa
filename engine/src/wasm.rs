@@ -111,3 +111,21 @@ pub fn position_state(game_string: &str, tournament: bool) -> Result<String, JsE
     let g = Game::from_game_string(game_string, tournament).map_err(|e| JsError::new(&e))?;
     Ok(json::state_json(&g))
 }
+
+/// The `count` best moves of a position with explanations
+/// (`json::candidates_json`). `time_ms` is the total budget.
+#[wasm_bindgen]
+pub fn candidates(
+    game_string: &str,
+    time_ms: f64,
+    count: u32,
+    tournament: bool,
+) -> Result<String, JsError> {
+    let g = Game::from_game_string(game_string, tournament).map_err(|e| JsError::new(&e))?;
+    ANALYSIS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let s = slot.get_or_insert_with(|| Searcher::new(18));
+        let c = crate::analysis::candidates(&g, s, time_ms, count as usize);
+        Ok(json::candidates_json(&c))
+    })
+}

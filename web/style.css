@@ -473,3 +473,97 @@ body.analysis .log, body.analysis .hand { display: none; }
   #ana-graph { height: 72px; }
   .log.open #moves { max-height: 22vh; overflow-y: auto; }
 }
+
+/* ------------------------------------------------------------------ study */
+
+#study-btn.active { background: var(--accent); color: #1d2126; border-color: var(--accent); }
+body.study .log { display: none; }
+
+#study {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+#study[hidden] { display: none; }
+#study > * { flex: none; }
+
+.study-standing { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 0.95rem; }
+.study-label { color: var(--muted); font-size: 0.8rem; }
+.study-bar { flex: 1 0 100%; height: 8px; border-radius: 4px; background: #2b2f36; overflow: hidden; }
+.study-bar-fill { height: 100%; background: var(--white-piece); }
+.study-notes { margin: 0; padding-left: 1.2em; font-size: 0.85rem; color: var(--muted); }
+.study-notes:empty { display: none; }
+.study-notes li { margin: 2px 0; }
+.study-sub { margin: 4px 0 0; font-size: 0.95rem; }
+.study-sub span { font-weight: normal; font-size: 0.8rem; color: var(--muted); }
+
+.study-cands { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.study-cand {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #23272d;
+  font-size: 0.9rem;
+}
+.study-cand.previewing { border-color: var(--accent); }
+.study-cand p { margin: 4px 0; }
+.study-rank {
+  display: inline-grid;
+  place-items: center;
+  width: 1.6em;
+  height: 1.6em;
+  border-radius: 50%;
+  background: #313740;
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+.study-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; }
+.study-after { font-size: 0.8rem; color: var(--muted); }
+.study-plan { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line); }
+.study-plan-title { font-size: 0.85rem; color: var(--accent); }
+.study-cand details { margin-top: 4px; }
+.study-cand summary { cursor: pointer; }
+.study-cand-actions { display: flex; gap: 6px; margin-top: 6px; }
+.study-cand-actions button { flex: 1; }
+button.primary { background: var(--accent); color: #1d2126; border-color: var(--accent); }
+button.primary:disabled { opacity: 0.5; }
+
+.ghost-label {
+  font-size: 18px;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  fill: var(--accent);
+  pointer-events: none;
+}
+
+@media (max-width: 600px) {
+  body.study .side { max-height: 55vh; overflow-y: auto; }
+}
+#study { grid-column: 1 / -1; }
+
+/* Study board: wider panel, hands as one compact row per color. */
+body.study .layout { grid-template-columns: 1fr minmax(300px, 400px); }
+body.study .hand { display: flex; align-items: center; gap: 6px; }
+body.study .hand h2 { margin: 0; width: 1.4em; font-size: 0.8rem; justify-content: center; }
+body.study .hand h2 .full { display: none; }
+body.study .pieces { display: flex; flex: 1; gap: 4px; }
+body.study .hand-piece {
+  flex: 1;
+  min-height: 44px;
+  min-width: 0;
+  padding: 4px;
+  grid-template-columns: auto auto;
+  grid-template-rows: auto;
+  justify-content: center;
+  gap: 3px;
+}
+body.study .hand-piece .glyph { grid-row: auto; width: 26px; height: 26px; }
+body.study .hand-piece .name { display: none; }
+@media (max-width: 820px), (orientation: portrait) and (max-width: 1100px) {
+  body.study .layout { grid-template-columns: 1fr; }
+  body.study .side { display: flex; flex-direction: column; max-height: 50vh; }
+}

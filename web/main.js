@@ -39,13 +39,20 @@ function startWorker() {
     else p.reject(new Error(error));
   };
   worker.onerror = (e) => setStatus(`엔진 오류: ${e.message || e}`);
-  return (cmd, args) => {
+  const callFn = (cmd, args) => {
     const id = nextId++;
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
       worker.postMessage({ id, cmd, args });
     });
   };
+  // Stops a long computation; pending calls fail with "cancelled".
+  callFn.terminate = () => {
+    worker.terminate();
+    for (const p of pending.values()) p.reject(new Error('cancelled'));
+    pending.clear();
+  };
+  return callFn;
 }
 
 // The game worker plays; analysis runs in its own worker so long analyses
@@ -62,6 +69,7 @@ let busy = false; // waiting on the engine
 let view = { x: 0, y: 0, k: 1 };
 
 let ana = null; // analysis session, see "analysis" section
+let study = null; // study board session, see "study" section
 
 // State shown on the board: the game, or the analyzed position.
 function boardState() {
@@ -72,7 +80,9 @@ function boardState() {
 
 const pieceColor = (name) => (name[0] === 'w' ? 'White' : 'Black');
 const bugOf = (name) => name[1];
-const humanTurn = () => snap && snap.state.toMove === human && !isOver();
+// The side the person plays now: both sides on the study board.
+const me = () => (study ? snap.state.toMove : human);
+const humanTurn = () => snap && snap.state.toMove === me() && !isOver();
 const isOver = () => ['WhiteWins', 'BlackWins', 'Draw'].includes(snap.state.status);
 
 function hexToPixel(q, r) {
@@ -100,22 +110,26 @@ function el(tag, attrs = {}, parent) {
 function render() {
   if (!snap) return;
   document.body.classList.toggle('analysis', !!ana);
+  document.body.classList.toggle('study', !!study);
   renderBoard();
   renderHands();
   if (ana) {
     renderAnalysis();
+  } else if (study) {
+    renderStudy();
   } else {
     renderLog();
     renderStatus();
   }
   $('pass').disabled = !(humanTurn() && snap.moves.length === 1 && snap.moves[0].uhp === 'pass');
   $('undo').disabled = (busy && !thinking) || snap.state.ply === 0;
-  $('hint').disabled = !humanTurn() || busy || !!ana;
+  $('hint').disabled = !humanTurn() || busy || !!ana || !!study;
   if (ana) {
     $('pass').disabled = true;
     $('undo').disabled = true;
   }
   $('analyze').classList.toggle('active', !!ana);
+  $('study-btn').classList.toggle('active', !!study);
 }
 
 function renderBoard() {
@@ -129,6 +143,8 @@ function renderBoard() {
     lastFrom = best.bestFrom;
     lastTo = null;
   }
+  // Study board: a candidate shown on the board.
+  const preview = study && !ana ? study.preview : null;
 
   if (cells.length === 0) {
     el('polygon', { points: hexPoints(0, 0, R - 4), class: 'origin' }, cellsLayer);
@@ -148,7 +164,8 @@ function renderBoard() {
       el('polygon', { points: hexPoints(x + i * 3, y + i * 3, R - 2), class: `under ${pieceColor(c.stack[i - 1])}` }, g);
     }
     const isSel = (selected && selected.from && same(selected.from, c.q, c.r))
-      || (best && same(best.bestFrom, c.q, c.r));
+      || (best && same(best.bestFrom, c.q, c.r))
+      || (preview && same(preview.from, c.q, c.r));
     const cls = ['piece', pieceColor(top), `bug-${bugOf(top)}`];
     if (isSel) cls.push('selected');
     if (same(lastTo, c.q, c.r)) cls.push('last');
@@ -168,6 +185,12 @@ function renderBoard() {
   if (best && best.bestTo) {
     const [x, y] = hexToPixel(best.bestTo[0], best.bestTo[1]);
     el('polygon', { points: hexPoints(x, y, R - 4), class: 'target hint' }, targetsLayer);
+  }
+  if (preview && preview.to) {
+    const [x, y] = hexToPixel(preview.to[0], preview.to[1]);
+    el('polygon', { points: hexPoints(x, y, R - 4), class: 'target hint' }, targetsLayer);
+    const t = el('text', { x, y: y + 1, class: 'ghost-label' }, targetsLayer);
+    t.textContent = preview.piece ? preview.piece.slice(1) : '';
   }
   if (selected && !ana) {
     for (const m of movesOfSelected()) {
@@ -216,9 +239,9 @@ function renderHands() {
       const next = left[0];
       const b = document.createElement('button');
       b.className = `hand-piece ${color} bug-${bug}`;
-      const placeable = !ana && color === human && humanTurn() && snap.moves.some((m) => m.piece === next && !m.from);
+      const placeable = !ana && color === me() && humanTurn() && snap.moves.some((m) => m.piece === next && !m.from);
       b.disabled = !placeable;
-      if (color !== human) b.classList.add('opponent');
+      if (color !== me()) b.classList.add('opponent');
       if (selected && selected.piece === next && !selected.from) b.classList.add('selected');
       b.innerHTML = `<span class="glyph">${bug}</span><span class="name">${BUG_NAMES[bug]}</span><span class="count">×${left.length}</span>`;
       b.addEventListener('click', () => selectPiece(next, null));
@@ -278,6 +301,7 @@ function selectPiece(piece, from) {
   if (!humanTurn() || busy) return;
   if (selected && selected.piece === piece) selected = null;
   else selected = { piece, from };
+  if (study) study.preview = null;
   if (selected && movesOfSelected().length === 0) selected = null;
   render();
 }
@@ -302,7 +326,7 @@ function onBoardTap(target) {
   const cell = snap.state.cells.find((c) => c.q === q && c.r === r);
   if (cell) {
     const top = cell.stack[cell.stack.length - 1];
-    if (pieceColor(top) === human) {
+    if (pieceColor(top) === me()) {
       selectPiece(top, [q, r]);
       return;
     }
@@ -319,11 +343,13 @@ async function play(uhp) {
   busy = true;
   try {
     snap = await call('play', { move: uhp });
+    if (study) studyPlayed(uhp);
   } catch (e) {
     setStatus(`둘 수 없는 수: ${e.message}`);
   }
   busy = false;
   render();
+  if (study) refreshStudy();
   maybeAiMove();
 }
 
@@ -340,7 +366,7 @@ function describeScore(score) {
 }
 
 async function maybeAiMove() {
-  if (!snap || isOver() || snap.state.toMove === human) return;
+  if (!snap || study || isOver() || snap.state.toMove === human) return;
   const gen = generation;
   busy = true;
   thinking = true;
@@ -381,6 +407,7 @@ async function showHint() {
 
 async function newGame() {
   closeAnalysis();
+  closeStudy();
   generation++;
   thinking = false;
   lastAi = null;
@@ -397,6 +424,10 @@ async function newGame() {
 }
 
 async function undo() {
+  if (study) {
+    studyBack();
+    return;
+  }
   // Undo may interrupt the AI while it thinks (its answer is then dropped).
   if ((busy && !thinking) || !snap || snap.state.ply === 0) return;
   selected = null;
@@ -580,6 +611,7 @@ async function ensureState(k) {
 }
 
 async function openAnalysis(moves, tournament) {
+  closeStudy();
   const gen = ++anaGen;
   selected = null;
   hint = null;
@@ -782,15 +814,22 @@ window.addEventListener('keydown', (e) => {
   else if (e.key === 'ArrowRight') goTo(ana.ply + 1);
 });
 
+// Moves of a UHP GameString ("Base;InProgress;White[3];wS1;...") or of a
+// plain ';'-separated move list.
+function parseGameText(text) {
+  const parts = text.trim().split(';').map((x) => x.trim()).filter(Boolean);
+  if (parts[0] === 'Base') parts.shift();
+  if (parts.length && /^(NotStarted|InProgress|Draw|WhiteWins|BlackWins)$/.test(parts[0])) parts.shift();
+  if (parts.length && /^(White|Black)\[\d+\]$/.test(parts[0])) parts.shift();
+  return parts;
+}
+
 // Import: a UHP GameString ("Base;InProgress;White[3];wS1;bS1 wS1-;...")
 // or just the moves separated by ';'.
 $('ana-import').addEventListener('click', async () => {
   const text = prompt('기보(UHP GameString)를 붙여 넣는다.\n예: Base;InProgress;White[3];wS1;bS1 wS1-;wQ -wS1;bQ bS1-');
   if (!text) return;
-  const parts = text.trim().split(';').map((x) => x.trim()).filter(Boolean);
-  if (parts[0] === 'Base') parts.shift();
-  if (parts.length && /^(NotStarted|InProgress|Draw|WhiteWins|BlackWins)$/.test(parts[0])) parts.shift();
-  if (parts.length && /^(White|Black)\[\d+\]$/.test(parts[0])) parts.shift();
+  const parts = parseGameText(text);
   const tournament = ana ? ana.tournament : true;
   try {
     // Validates every move; throws with the offending move otherwise.
@@ -837,6 +876,406 @@ $('ana-continue').addEventListener('click', async () => {
   selected = null;
   render();
   fit();
+});
+
+// ------------------------------------------------------------------- study
+//
+// Study board: the person plays both sides from any position (an empty
+// board by default) and sees the engine's best candidate moves, each with
+// plain-language reasons. Candidates are cached per position (key = moves
+// so far); a dedicated worker computes them and is restarted when the
+// position changes mid-computation.
+
+const STUDY_COUNT = 5;
+let studyCall = null;
+let studyBusyKey = null; // position the study worker is working on
+let studyGen = 0;
+
+const posKey = (moves) => moves.join(';');
+
+function studyWorker() {
+  if (!studyCall) studyCall = startWorker();
+  return studyCall;
+}
+
+// Drops the computation in flight (a new position makes it useless).
+function cancelStudyWork() {
+  if (studyCall && studyBusyKey !== null) {
+    studyCall.terminate();
+    studyCall = null;
+  }
+  studyBusyKey = null;
+}
+
+async function openStudy() {
+  if (snap && snap.state.ply > 0 && !isOver() && !ana
+    && !confirm('진행 중인 대국을 접고 빈 판에서 탐구를 시작할까?')) return;
+  closeAnalysis();
+  generation++; // drop a pending AI move
+  thinking = false;
+  hint = null;
+  lastAi = null;
+  selected = null;
+  study = {
+    timeMs: +$('study-speed').value,
+    cache: new Map(), // key -> candidates result
+    judged: new Map(), // key of position after a move -> move report
+    redo: [], // moves taken back, last = next to replay
+    preview: null,
+    error: null,
+  };
+  $('study').hidden = false;
+  busy = true;
+  snap = await call('new', { tournament: $('tournament').checked });
+  busy = false;
+  render();
+  fit();
+  refreshStudy();
+}
+
+function closeStudy() {
+  if (!study) return;
+  studyGen++;
+  cancelStudyWork();
+  study = null;
+  $('study').hidden = true;
+}
+
+// Keeps the redo list when the move played is the one that was taken back.
+function studyPlayed(uhp) {
+  study.preview = null;
+  const next = study.redo[study.redo.length - 1];
+  if (next === uhp) study.redo.pop();
+  else study.redo = [];
+}
+
+async function studyBack() {
+  if (!study || busy || snap.state.ply === 0) return;
+  const last = snap.state.history[snap.state.ply - 1];
+  busy = true;
+  selected = null;
+  study.preview = null;
+  snap = await call('undo', { n: 1 });
+  study.redo.push(last);
+  busy = false;
+  render();
+  refreshStudy();
+}
+
+async function studyForward() {
+  if (!study || busy || study.redo.length === 0) return;
+  await play(study.redo[study.redo.length - 1]);
+}
+
+async function studyReset() {
+  if (!study || busy || snap.state.ply === 0) return;
+  const moves = snap.state.history.slice();
+  busy = true;
+  selected = null;
+  study.preview = null;
+  snap = await call('new', { tournament: snap.state.tournament });
+  study.redo = study.redo.concat(moves.reverse());
+  busy = false;
+  render();
+  fit();
+  refreshStudy();
+}
+
+// Computes candidates for the shown position, then judges the move that led
+// here if it was not one of the previous position's candidates.
+async function refreshStudy() {
+  if (!study) return;
+  const gen = studyGen;
+  const moves = snap.state.history.slice();
+  const key = posKey(moves);
+  const tournament = snap.state.tournament;
+  study.error = null;
+  if (studyBusyKey !== null && studyBusyKey !== key) cancelStudyWork();
+  if (studyBusyKey === key) return; // already on it
+  if (!study.cache.has(key)) {
+    studyBusyKey = key;
+    renderStudy();
+    let res;
+    try {
+      res = await studyWorker()('candidates', {
+        gameString: gameStringOf(moves, moves.length), timeMs: study.timeMs, count: STUDY_COUNT, tournament,
+      });
+    } catch (e) {
+      if (e.message === 'cancelled') return;
+      if (studyBusyKey === key) studyBusyKey = null;
+      if (study && gen === studyGen) {
+        study.error = e.message;
+        renderStudy();
+      }
+      return;
+    }
+    if (studyBusyKey === key) studyBusyKey = null;
+    if (!study || gen !== studyGen) return;
+    study.cache.set(key, res);
+    if (posKey(snap.state.history) !== key) return; // moved on meanwhile
+    renderStudy();
+  }
+  // Judge the last move when the candidates of the previous position do not
+  // already cover it.
+  if (moves.length === 0 || study.judged.has(key)) return;
+  const last = moves[moves.length - 1];
+  const prev = study.cache.get(posKey(moves.slice(0, -1)));
+  if (prev && prev.list.some((c) => c.same.includes(last))) return;
+  studyBusyKey = key;
+  let rep;
+  try {
+    rep = await studyWorker()('analyze', {
+      gameString: gameStringOf(moves, moves.length - 1), move: last, timeMs: study.timeMs / 2, tournament,
+    });
+  } catch (e) {
+    if (studyBusyKey === key) studyBusyKey = null;
+    return;
+  }
+  if (studyBusyKey === key) studyBusyKey = null;
+  if (!study || gen !== studyGen) return;
+  study.judged.set(key, rep);
+  if (posKey(snap.state.history) === key) renderStudy();
+}
+
+function renderStudy() {
+  if (!study) return;
+  const s = snap.state;
+  const moves = s.history;
+  const key = posKey(moves);
+  const res = study.cache.get(key);
+  $('study-pos').textContent = s.ply === 0 ? '빈 판' : `${s.ply}수 뒤`;
+  $('study-back').disabled = busy || s.ply === 0;
+  $('study-reset').disabled = busy || s.ply === 0;
+  $('study-fwd').disabled = busy || study.redo.length === 0;
+
+  // Status line.
+  let text;
+  if (s.status === 'WhiteWins' || s.status === 'BlackWins') {
+    text = `탐구 · ${COLOR_KO[s.status === 'WhiteWins' ? 'White' : 'Black']} 승리`;
+  } else if (s.status === 'Draw') {
+    text = '탐구 · 무승부';
+  } else {
+    text = `탐구 · ${COLOR_KO[s.toMove]} 차례 (${s.turn}수째) · 흑백 모두 직접 둔다`;
+    if (study.preview) text += ` · 보기: ${study.preview.desc}`;
+  }
+  setStatus(text);
+
+  // Standing and notes.
+  const st = $('study-standing');
+  st.replaceChildren();
+  if (res && res.list.length) {
+    st.append(node('span', 'study-label', '형세'));
+    st.append(node('span', '', res.standing));
+    const bar = node('div', 'study-bar');
+    const fill = node('div', 'study-bar-fill');
+    fill.style.width = `${((res.advantage + 1) / 2) * 100}%`;
+    bar.append(fill);
+    st.append(bar);
+  } else if (study.error) {
+    st.append(node('span', '', `계산 오류: ${study.error}`));
+  } else if (!isOver()) {
+    st.append(node('span', 'ana-hint', '후보 수 계산 중…'));
+  }
+  const notes = $('study-notes');
+  notes.replaceChildren();
+  for (const t of res ? res.notes : []) notes.append(node('li', '', t));
+
+  renderStudyJudge(moves);
+
+  // Candidates.
+  const ol = $('study-cands');
+  ol.replaceChildren();
+  $('study-count').textContent = res && res.legal
+    ? `(둘 수 있는 수 ${res.legal}개${res.distinct < res.legal ? `, 모양이 같은 수를 묶으면 ${res.distinct}가지` : ''})`
+    : '';
+  if (isOver()) {
+    ol.append(node('li', 'ana-hint', '게임이 끝났다. ◀로 되돌리거나 ⏮로 처음부터 다시 둔다.'));
+    return;
+  }
+  if (!res) return;
+  res.list.forEach((c, i) => ol.append(candidateItem(c, i)));
+}
+
+function candidateItem(c, i) {
+  const li = node('li', `study-cand${study.preview && study.preview.uhp === c.uhp ? ' previewing' : ''}`);
+  const head = node('div', 'ana-card-head');
+  head.append(node('span', 'study-rank', `${i + 1}`));
+  head.append(node('span', 'ana-move', c.desc));
+  li.append(head);
+  const tags = node('div', 'study-tags');
+  tags.append(node('span', `q-badge ${i === 0 ? 'q-best' : gapClass(c)}`, c.gap));
+  tags.append(node('span', 'study-after', `둔 뒤: ${c.standing}`));
+  li.append(tags);
+  if (c.same.length > 1) li.append(node('p', 'ana-hint', `돌리거나 뒤집으면 같은 모양이 되는 수 ${c.same.length}개를 하나로 묶었다.`));
+
+  const ul = node('ul', 'ana-reasons');
+  for (const t of c.reasons) ul.append(node('li', '', t));
+  li.append(ul);
+  if (c.plan) {
+    const box = node('div', 'study-plan');
+    box.append(node('p', 'study-plan-title', `상대가 응수한 뒤 다음 자기 수 (예상): ${c.plan.desc}`));
+    const pl = node('ul', 'ana-reasons');
+    for (const t of c.plan.reasons) pl.append(node('li', '', t));
+    box.append(pl);
+    li.append(box);
+  }
+  if (c.vsBest.length) {
+    const box = node('div', 'ana-best');
+    box.append(node('h3', '', '1순위 수가 더 나은 점'));
+    const vl = node('ul', 'ana-reasons');
+    for (const t of c.vsBest) vl.append(node('li', '', t));
+    box.append(vl);
+    li.append(box);
+  }
+  if (c.pv.length > 1 || c.note) {
+    const d = document.createElement('details');
+    d.append(node('summary', 'ana-pv-title', c.pv.length > 1 ? '예상 수순' : '이 말은'));
+    if (c.note) d.append(node('p', 'ana-hint', c.note));
+    if (c.pv.length > 1) {
+      const pv = node('ol', 'ana-pv');
+      for (const t of c.pv.slice(0, 8)) pv.append(node('li', '', t));
+      d.append(pv);
+    }
+    li.append(d);
+  }
+  const actions = node('div', 'study-cand-actions');
+  const show = node('button', 'small', study.preview && study.preview.uhp === c.uhp ? '보기 끄기' : '판에서 보기');
+  show.addEventListener('click', () => {
+    study.preview = study.preview && study.preview.uhp === c.uhp ? null : c;
+    selected = null;
+    render();
+    keepInView();
+  });
+  const playBtn = node('button', 'small primary', '이 수 두기');
+  playBtn.disabled = busy;
+  playBtn.addEventListener('click', () => { if (!busy) play(c.uhp); });
+  actions.append(show, playBtn);
+  li.append(actions);
+  return li;
+}
+
+function gapClass(c) {
+  if (/진다/.test(c.gap)) return 'q-blunder';
+  if (/크게/.test(c.gap)) return 'q-mistake';
+  if (/분명히/.test(c.gap)) return 'q-inaccuracy';
+  if (/이길|같다|아주 조금/.test(c.gap)) return 'q-good';
+  return 'q-fine';
+}
+
+// "Last move" card: its rank among the previous candidates, or a full
+// judgment when it was not one of them.
+function renderStudyJudge(moves) {
+  const box = $('study-judge');
+  box.replaceChildren();
+  if (moves.length === 0) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const last = moves[moves.length - 1];
+  const mover = moves.length % 2 === 1 ? 'White' : 'Black';
+  const prev = study.cache.get(posKey(moves.slice(0, -1)));
+  const idx = prev ? prev.list.findIndex((c) => c.same.includes(last)) : -1;
+  const head = node('div', 'ana-card-head');
+  box.append(head);
+  if (idx >= 0) {
+    const c = prev.list[idx];
+    head.append(node('span', `q-badge ${idx === 0 ? 'q-best' : gapClass(c)}`, idx === 0 ? '엔진 1순위' : `후보 ${idx + 1}순위`));
+    head.append(node('span', 'ana-move', `방금 둔 수 (${moves.length}수째 ${COLOR_KO[mover]}): ${c.desc}`));
+    if (idx > 0) box.append(node('p', 'ana-summary', `${c.gap}.`));
+    return;
+  }
+  const r = study.judged.get(posKey(moves));
+  if (!r) {
+    head.append(node('span', 'ana-move', `방금 둔 수 (${moves.length}수째 ${COLOR_KO[mover]}): ${last}`));
+    box.append(node('p', 'ana-hint', '이 수를 판정하는 중…'));
+    return;
+  }
+  head.append(node('span', `q-badge q-${r.quality}`, r.qualityKo));
+  head.append(node('span', 'ana-move', `방금 둔 수 (${moves.length}수째 ${COLOR_KO[mover]}): ${r.playedDesc}`));
+  box.append(node('p', 'ana-summary', r.summary));
+  const ul = node('ul', 'ana-reasons');
+  for (const t of r.reasons) ul.append(node('li', '', t));
+  box.append(ul);
+  if (r.showBest) {
+    const b = node('div', 'ana-best');
+    b.append(node('h3', '', '더 좋은 수'));
+    b.append(node('p', 'ana-move', r.bestDesc));
+    const why = node('ul', 'ana-reasons');
+    for (const t of r.bestReasons) why.append(node('li', '', t));
+    b.append(why);
+    box.append(b);
+  }
+}
+
+$('study-btn').addEventListener('click', () => {
+  if (study) {
+    closeStudy();
+    render();
+    fit();
+  } else {
+    openStudy().catch((e) => setStatus(`탐구를 시작하지 못했다: ${e.message}`));
+  }
+});
+$('study-close').addEventListener('click', () => { closeStudy(); render(); fit(); });
+$('study-back').addEventListener('click', studyBack);
+$('study-fwd').addEventListener('click', studyForward);
+$('study-reset').addEventListener('click', studyReset);
+$('study-speed').addEventListener('change', () => {
+  if (!study) return;
+  study.timeMs = +$('study-speed').value;
+  cancelStudyWork();
+  study.cache.clear();
+  study.judged.clear();
+  render();
+  refreshStudy();
+});
+window.addEventListener('keydown', (e) => {
+  if (!study || e.target.closest('input, select, textarea')) return;
+  if (e.key === 'ArrowLeft') studyBack();
+  else if (e.key === 'ArrowRight') studyForward();
+});
+
+// Leave the study board and play the AI from here, as the side to move.
+$('study-ai').addEventListener('click', () => {
+  if (!study) return;
+  human = snap.state.toMove;
+  $('color').value = human;
+  closeStudy();
+  generation++;
+  render();
+  fit();
+});
+
+$('study-import').addEventListener('click', async () => {
+  if (!study) return;
+  const text = prompt('기보(UHP GameString)를 붙여 넣는다. 그 국면부터 탐구한다.');
+  if (!text) return;
+  const parts = parseGameText(text);
+  busy = true;
+  try {
+    snap = await call('load', { gameString: gameStringOf(parts, parts.length), tournament: snap.state.tournament });
+  } catch (e) {
+    busy = false;
+    alert(`기보를 읽지 못했다: ${e.message}`);
+    return;
+  }
+  busy = false;
+  study.redo = [];
+  study.preview = null;
+  selected = null;
+  render();
+  fit();
+  refreshStudy();
+});
+
+$('study-copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(snap.state.gameString);
+    setStatus('기보(UHP GameString)를 복사했다');
+  } catch {
+    prompt('기보', snap.state.gameString);
+  }
 });
 
 newGame().catch((e) => setStatus(`엔진을 불러오지 못했다: ${e.message}`));

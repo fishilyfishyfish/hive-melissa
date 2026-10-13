@@ -132,3 +132,50 @@ pub fn report_json(r: &crate::analysis::MoveReport) -> String {
         esc(&standing_ko(r.after_white)),
     )
 }
+
+/// Candidate moves for the study board (see `analysis::candidates`).
+pub fn candidates_json(c: &crate::analysis::Candidates) -> String {
+    use crate::analysis::{advantage, standing_ko};
+    let strs = |v: &[String]| list(v.iter().map(|s| esc(s)));
+    let items = list(c.list.iter().map(|x| {
+        let plan = match &x.plan {
+            Some((d, rs)) => format!("{{\"desc\":{},\"reasons\":{}}}", esc(d), strs(rs)),
+            None => "null".into(),
+        };
+        format!(
+            "{{\"uhp\":{},\"desc\":{},\"same\":{},\"piece\":{},\"from\":{},\"to\":{},\"score\":{},\"depth\":{},\
+             \"gap\":{},\"reasons\":{},\"vsBest\":{},\"note\":{},\"plan\":{},\"pv\":{},\"afterWhite\":{},\
+             \"advantage\":{:.4},\"standing\":{}}}",
+            esc(&x.uhp),
+            esc(&x.desc),
+            strs(&x.same),
+            x.mv.piece()
+                .map(|p| esc(&p.name()))
+                .unwrap_or_else(|| "null".into()),
+            hex_json(x.mv.from()),
+            hex_json(x.mv.to()),
+            x.score,
+            x.depth,
+            esc(&x.gap),
+            strs(&x.reasons),
+            strs(&x.vs_best),
+            x.note.as_deref().map(esc).unwrap_or_else(|| "null".into()),
+            plan,
+            strs(&x.pv),
+            x.after_white,
+            advantage(x.after_white),
+            esc(&standing_ko(x.after_white)),
+        )
+    }));
+    format!(
+        "{{\"toMove\":{},\"scoreWhite\":{},\"advantage\":{:.4},\"standing\":{},\"notes\":{},\"legal\":{},\"distinct\":{},\"list\":{}}}",
+        esc(c.to_move.name()),
+        c.score_white,
+        advantage(c.score_white),
+        esc(&standing_ko(c.score_white)),
+        strs(&c.notes),
+        c.legal,
+        c.distinct,
+        items
+    )
+}
